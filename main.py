@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.test_router import router as test_router
+from app.controller.testController import router as test_router
 
 app = FastAPI(
     title="MJU Capstone AI AGENTI",
