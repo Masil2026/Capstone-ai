@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     HOTELBEDS_SECRET: str
     HOTELBEDS_BASE_URL: str
 
+    # --- Duffel API ---
+    DUFFEL_API_KEY: str
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
