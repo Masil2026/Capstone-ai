@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     PORT: int
     JAVA_BACKEND_URL: str
 
+    # --- Hotelbeds API ---
+    HOTELBEDS_API_KEY: str
+    HOTELBEDS_SECRET: str
+    HOTELBEDS_BASE_URL: str
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
