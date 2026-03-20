@@ -83,7 +83,7 @@ async def test_flight_validation_error():
     }
 
     result = await service.process_task(action="search_flights", params=invalid_params)
+    expected_message = f"아이 인원({children_count}명)과 나이 정보({len(child_ages_list)}개)의 개수가 일치하지 않습니다."
     
     assert result["status"] == "error"
-    expected_message = f"아이 인원({children_count}명)과 나이 정보({len(child_ages_list)}개)의 개수가 일치하지 않습니다."
     assert result["message"] == expected_message

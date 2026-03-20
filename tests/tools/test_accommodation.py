@@ -1,54 +1,84 @@
 import pytest
-import json
 from app.services.adapters.accommodation_api import AccommodationAdapter
 from app.services.travel_agent_service import TravelAgentService
 
-@pytest.mark.asyncio
-async def test_accommodation_search():
-    """
-    search_hotels 액션 테스트 (children : 0)
-    """
+def _print_hotel_results(test_name, result):
+    print("\n" + "="*65)
+    print(f"[{test_name}] - RESULT STATUS: {result['status']}")
+    print("-" * 65)
+    
+    if result["status"] == "success":
+        print(f"FOUND: {result.get('count', 0)} hotels")
+        print("-" * 65)
+        # 헤더: 번호 | 호텔명 | 가격 | 별점 | 주소
+        print(f"{'No':<3} | {'Hotel Name':<25} | {'Price':<15} | {'Star':<5} | {'Address'}")
+        print("-" * 65)
+        
+        for i, hotel in enumerate(result.get("data", []), 1):
+            name = hotel.get('name', 'N/A')[:23] # 이름이 길면 자름
+            price = hotel.get('price', 'N/A')
+            star = hotel.get('rating', '-')
+            addr = hotel.get('address', 'N/A')[:40] # 주소도 길면 자름
+            
+            print(f"{i:<3} | {name:<25} | {price:<15} | {star:<5} | {addr}")
+    
+    else:
+        # 에러 메시지가 리스트일 경우를 대비해 상세히 출력
+        msg = result.get('message')
+        print(f"❌ ERROR DETAIL: {msg}")
+    
+    print("="*65 + "\n")
 
-    # Given
+@pytest.mark.asyncio
+async def test_hotel_search_with_child():
+    """[search_hotels] 아이 포함 숙소 검색 테스트"""
     adapter = AccommodationAdapter()
     service = TravelAgentService(adapter)
     
-    # 실제 어댑터의 파라미터 규격에 맞게 구성
-    task_params = {
-        "city_code": "TYO",        # 도쿄
-        "check_in": "2026-04-01",
-        "check_out": "2026-04-05",
+    # 도쿄(TYO) 지역, 6월 15일~18일 (3박)
+    params = {
+        "city_code": "TYO",
+        "check_in": "2026-06-15",
+        "check_out": "2026-06-18",
         "rooms": 1,
         "adults": 2,
-        "children": 0,
-        "sort_by": "price"         # 최저가순 정렬 테스트
+        "children": 1,
+        "child_ages": [7]
     }
-    
-    # When
-    result = await service.process_task(
-        action="search_hotels",
-        params=task_params
-    )
 
-    # --- [응답 찍어보기] ---
-    print("\n" + "="*50)
-    print("API RESPONSE STATUS:", result.get("status"))
-    print("TOTAL COUNT:", result.get("count"))
-
-    if result.get("status") == "success" and result.get("data"):
-        # 첫 번째 호텔 데이터만 샘플로 출력 (너무 길면 보기 힘드니까요)
-        sample_hotel = result["data"][0]
-        print("\n[SAMPLE HOTEL DATA]:")
-        print(json.dumps(sample_hotel, indent=2, ensure_ascii=False))
-    else:
-        print("\n[ERROR/EMPTY DATA]:", result.get("message"))
-    print("="*50 + "\n")
+    print(f"\n[Test 1] Searching Hotels in {params['city_code']} for {params['adults']} Adults & {params['children']} Child")
     
-    # Then
+    result = await service.process_task(action="search_hotels", params=params)
+    
+    # 결과 출력
+    _print_hotel_results("DUFFEL HOTEL SEARCH", result)
+    
+    # 검증
     assert result["status"] == "success"
-    # 'data'가 리스트인지 확인하는 것이 더 정확합니다.
     assert isinstance(result["data"], list)
+    assert len(result["data"]) <= 10 # 어댑터에서 10개로 제한했으므로
+
+
+@pytest.mark.asyncio
+async def test_hotel_validation_error():
+    """[search_hotels] 아이 인원수 불일치 에러 테스트"""
+    adapter = AccommodationAdapter()
+    service = TravelAgentService(adapter)
     
-    # Then
-    # assert result["status"] == "success"
-    # assert "숙소" in result["data"]
+    children_count = 2
+    child_ages_list = [10]
+    
+    # 아이는 1명인데 나이 정보를 안 보냈을 때
+    invalid_params = {
+        "city_code": "TYO",
+        "check_in": "2026-06-15",
+        "check_out": "2026-06-18",
+        "children": children_count, 
+        "child_ages": child_ages_list
+    }
+
+    result = await service.process_task(action="search_hotels", params=invalid_params)
+    expected_message = f"아이 인원({children_count}명)과 나이 정보({len(child_ages_list)}개)의 개수가 일치하지 않습니다."
+    
+    assert result["status"] == "error"
+    assert result["message"] == expected_message

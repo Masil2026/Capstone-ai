@@ -26,11 +26,6 @@ class Settings(BaseSettings):
     PORT: int
     JAVA_BACKEND_URL: str
 
-    # --- Hotelbeds API ---
-    HOTELBEDS_API_KEY: str
-    HOTELBEDS_SECRET: str
-    HOTELBEDS_BASE_URL: str
-
     # --- Duffel API ---
     DUFFEL_API_KEY: str
 
