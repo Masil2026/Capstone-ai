@@ -11,7 +11,7 @@ async def test_meta_graph_get_posts():
     # When
     result = await service.process_task(
         action="get_user_posts",
-        user_id="test_user"
+        params={"user_id": "test_user"}
     )
     
     # Then

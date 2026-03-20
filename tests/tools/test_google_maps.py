@@ -11,8 +11,7 @@ async def test_google_maps_find_route():
     # When
     result = await service.process_task(
         action="find_route",
-        origin="Seoul",
-        dest="Busan"
+        params={"origin": "Seoul", "dest": "Busan"}
     )
     
     # Then
