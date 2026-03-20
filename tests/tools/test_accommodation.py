@@ -25,19 +25,19 @@ def _print_hotel_results(test_name, result):
     else:
         # 에러 메시지가 리스트일 경우를 대비해 상세히 출력
         msg = result.get('message')
-        print(f"❌ ERROR DETAIL: {msg}")
+        print(f"ERROR DETAIL: {msg}")
     
     print("="*65 + "\n")
 
 @pytest.mark.asyncio
 async def test_hotel_search_with_child():
-    """[search_hotels] 아이 포함 숙소 검색 테스트"""
+    """[search_hotels] 아이 포함 숙소 검색 테스트 (도시명 사용)"""
     adapter = AccommodationAdapter()
     service = TravelAgentService(adapter)
     
-    # 도쿄(TYO) 지역, 6월 15일~18일 (3박)
+    # 도쿄 지역, 6월 15일~18일 (3박)
     params = {
-        "city_code": "TYO",
+        "city_name": "Tokyo",
         "check_in": "2026-06-15",
         "check_out": "2026-06-18",
         "rooms": 1,
@@ -46,7 +46,7 @@ async def test_hotel_search_with_child():
         "child_ages": [7]
     }
 
-    print(f"\n[Test 1] Searching Hotels in {params['city_code']} for {params['adults']} Adults & {params['children']} Child")
+    print(f"\n[Test 1] Searching Hotels in {params['city_name']} for {params['adults']} Adults & {params['children']} Child")
     
     result = await service.process_task(action="search_hotels", params=params)
     
@@ -70,7 +70,7 @@ async def test_hotel_validation_error():
     
     # 아이는 1명인데 나이 정보를 안 보냈을 때
     invalid_params = {
-        "city_code": "TYO",
+        "city_name": "Tokyo",
         "check_in": "2026-06-15",
         "check_out": "2026-06-18",
         "children": children_count, 
@@ -82,3 +82,35 @@ async def test_hotel_validation_error():
     
     assert result["status"] == "error"
     assert result["message"] == expected_message
+
+
+@pytest.mark.asyncio
+async def test_hotel_search_by_city_name():
+    """[search_hotels] 도시명(osaka) 기반 좌표 추출 및 숙소 검색 테스트"""
+    adapter = AccommodationAdapter()
+    service = TravelAgentService(adapter)
+
+    # 오사카 지역, 2026년 7월 1일~4일 (3박)
+    params = {
+        "city_name": "osaka",
+        "check_in": "2026-07-01",
+        "check_out": "2026-07-04",
+        "rooms": 1,
+        "adults": 1
+    }
+
+    print(f"\n[Test 3] Searching Hotels in {params['city_name']} using coordinate extraction")
+
+    result = await service.process_task(action="search_hotels", params=params)
+
+    # 결과 출력
+    _print_hotel_results("DUFFEL CITY NAME SEARCH", result)
+
+    # 검증
+    assert result["status"] == "success"
+    if result["count"] > 0:
+        assert isinstance(result["data"], list)
+        assert len(result["data"]) <= 10
+    else:
+        # 검색 결과가 없는 경우도 정상적인 성공 응답으로 처리됨 (Count 0)
+        assert result.get("message") == "검색 결과가 없습니다."
