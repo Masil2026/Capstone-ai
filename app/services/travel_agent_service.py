@@ -9,9 +9,9 @@ class TravelAgentService:
     def __init__(self, tool: ApiTools):
         self.tool = tool
 
-    async def process_task(self, action: str, **kwargs) -> Dict[str, Any]:
+    async def process_task(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         에이전트의 요청을 받아 적절한 도구를 실행함.
         """
         print(f"[TravelAgentService] Processing task: {action} with tool: {self.tool.tool_name}")
-        return await self.tool.execute(action, kwargs)
+        return await self.tool.execute(action, params)
