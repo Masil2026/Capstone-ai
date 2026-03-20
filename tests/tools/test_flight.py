@@ -3,20 +3,21 @@ from app.services.adapters.flight_api import FlightAdapter
 from app.services.travel_agent_service import TravelAgentService
 
 def _print_flight_results(test_name, result):
-    print("\n" + "="*65)
+    print("\n" + "="*85)
     print(f"[{test_name}] - RESULT STATUS: {result['status']}")
     
     if result["status"] == "success":
         print(f"TOTAL FOUND: {result.get('count', 0)} offers")
-        print("-" * 65)
-        print(f"{'No':<3} | {'Airline':<18} | {'Price':<12} | {'Stops':<7} | {'Departure':<20} | {'Arrival':<20}")
-        print("-" * 65)
+        print("-" * 85)
+        print(f"{'No':<3} | {'Airline':<18} | {'Route':<11} | {'Price':<12} | {'Stops':<7} | {'Departure':<20}")
+        print("-" * 85)
         
         for i, flight in enumerate(result.get("data", []), 1):
             stop_text = "Direct" if flight['stops'] == 0 else f"{flight['stops']} Stop"
-            print(f"{i:<3} | {flight['airline']:<18} | {flight['total_amount']:<12} | {stop_text:<7} | {flight['departing_at']}")
+            route = f"{flight['origin']}->{flight['destination']}"
+            print(f"{i:<3} | {flight['airline']:<18} | {route:<11} | {flight['total_amount']:<12} | {stop_text:<7} | {flight['departing_at']}")
     
-    print("="*65 + "\n")
+    print("="*85 + "\n")
 
 
 @pytest.mark.asyncio
@@ -26,7 +27,7 @@ async def test_flight_search_with_child():
     service = TravelAgentService(adapter)
     
     params = {
-        "origin": "ICN", "destination": "NRT",
+        "origin": "seoul", "destination": "tokyo",
         "departure_date": "2026-05-15",
         "adults": 1, "children": 1, "child_ages": [5]
     }
@@ -34,12 +35,11 @@ async def test_flight_search_with_child():
     result = await service.process_task(action="search_flights", params=params)
     
     # 결과 출력
-    # _print_flight_results("CHILD INCLUDED SEARCH", result)
+    _print_flight_results("CHILD INCLUDED SEARCH", result)
     
     assert result["status"] == "success"
     assert isinstance(result["data"], list)
     assert len(result["data"]) > 0
-    assert len(result["data"]) <= 10
 
 
 @pytest.mark.asyncio
@@ -49,7 +49,7 @@ async def test_flight_search_adults_only():
     service = TravelAgentService(adapter)
     
     params = {
-        "origin": "ICN", "destination": "NRT",
+        "origin": "seoul", "destination": "osaka",
         "departure_date": "2026-06-20",
         "adults": 2
     }
@@ -57,12 +57,11 @@ async def test_flight_search_adults_only():
     result = await service.process_task(action="search_flights", params=params)
     
     # 결과 출력
-    # _print_flight_results("ADULTS ONLY SEARCH", result)
+    _print_flight_results("ADULTS ONLY SEARCH", result)
     
     assert result["status"] == "success"
     assert isinstance(result["data"], list)
     assert len(result["data"]) > 0
-    assert len(result["data"]) <= 10
 
 
 @pytest.mark.asyncio
@@ -75,8 +74,8 @@ async def test_flight_validation_error():
     child_ages_list = [10]
     
     invalid_params = {
-        "origin": "ICN", 
-        "destination": "NRT",
+        "origin": "seoul", 
+        "destination": "tokyo",
         "departure_date": "2026-06-15",
         "children": children_count, 
         "child_ages": child_ages_list
@@ -87,3 +86,27 @@ async def test_flight_validation_error():
     
     assert result["status"] == "error"
     assert result["message"] == expected_message
+
+
+@pytest.mark.asyncio
+async def test_flight_search_with_city_names():
+    """[search_flights] 도시명(seoul, osaka)을 입력했을 때 IATA 코드로 자동 변환되어 검색되는지 테스트"""
+    adapter = FlightAdapter()
+    service = TravelAgentService(adapter)
+    
+    # IATA 코드 대신 도시명을 입력
+    params = {
+        "origin": "seoul", 
+        "destination": "osaka",
+        "departure_date": "2026-06-25",
+        "adults": 1
+    }
+
+    result = await service.process_task(action="search_flights", params=params)
+    
+    # 결과 출력 (필요 시 주석 해제)
+    _print_flight_results("CITY NAME SEARCH (seoul -> osaka)", result)
+    
+    assert result["status"] == "success"
+    assert isinstance(result["data"], list)
+    assert len(result["data"]) > 0

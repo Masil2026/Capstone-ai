@@ -20,6 +20,22 @@ class FlightAdapter(ApiTools):
             "Content-Type": "application/json",
         }
 
+    async def _get_iata_code(self, query: str) -> str:
+        """Duffel Places Suggestions API를 사용하여 도시명을 IATA 코드로 변환합니다."""
+        url = "https://api.duffel.com/places/suggestions"
+        headers = self._get_headers()
+        params = {"query": query}
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+            data = response.json()
+
+            if response.status_code != 200 or not data.get("data"):
+                return None
+            
+            # 첫 번째 항목의 iata_code 추출
+            return data["data"][0].get("iata_code")
+
     async def execute(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
         # 1. 항공권 검색 요청 (Offer Request)
@@ -27,21 +43,32 @@ class FlightAdapter(ApiTools):
             url = f"{self.base_url}/offer_requests"
             
             # 1. 필수 파라미터 추출
-            origin = params.get("origin")
-            destination = params.get("destination")
+            origin_query = params.get("origin")
+            dest_query = params.get("destination")
             departure_date = params.get("departure_date")
             adults = int(params.get("adults", 1))
             children = int(params.get("children", 0))  # 기본값 0
             child_ages = params.get("child_ages", [])
 
             # 2. 검증 로직: 필수 값 체크
-            if not all([origin, destination, departure_date]):
+            if not all([origin_query, dest_query, departure_date]):
                 return {
                     "status": "error",
                     "message": "[Duffel API] origin, destination, departure_date 정보가 필수입니다."
                 }
 
-            # 3. 검증 로직: 아동 인원과 나이 정보 개수 일치 여부
+            # 3. IATA 코드 변환 (도시명 -> 코드)
+            # 입력값이 이미 3자리 대문자 IATA 코드 형태라면 그대로 사용하고, 아니면 검색 수행
+            origin = origin_query.upper() if len(origin_query) == 3 and origin_query.isalpha() else await self._get_iata_code(origin_query)
+            destination = dest_query.upper() if len(dest_query) == 3 and dest_query.isalpha() else await self._get_iata_code(dest_query)
+
+            if not origin or not destination:
+                return {
+                    "status": "error",
+                    "message": f"[Duffel API] IATA 코드를 찾을 수 없습니다. (출발지: {origin_query}, 도착지: {dest_query})"
+                }
+
+            # 4. 검증 로직: 아동 인원과 나이 정보 개수 일치 여부
             if children > 0 and len(child_ages) != children:
                 return {
                     "status": "error", 
@@ -91,6 +118,8 @@ class FlightAdapter(ApiTools):
                         "offer_id": offer["id"],
                         "total_amount": f"{offer['total_amount']} {offer['total_currency']}",
                         "airline": offer["owner"]["name"],
+                        "origin": segments[0]["origin"]["iata_code"],
+                        "destination": segments[-1]["destination"]["iata_code"],
                         "departing_at": segments[0]["departing_at"],
                         "arriving_at": segments[-1]["arriving_at"],
                         "stops": len(segments) - 1, # 경유 횟수 (0개면 직항, 1개면 1회 경유)
