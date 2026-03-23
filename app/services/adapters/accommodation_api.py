@@ -27,25 +27,51 @@ class AccommodationAdapter(ApiTools):
         params = {"query": query}
 
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url, headers=headers, params=params)
-            
-            if response.status_code != 200:
+            try:
+                response = await client.get(url, headers=headers, params=params)
+                
+                if response.status_code != 200:
+                    return None
+                
+                data = response.json()
+                suggestions = data.get("data", [])
+                
+                if not suggestions:
+                    return None
+                
+                # 1. 도시(city) 타입의 제안을 우선적으로 찾음
+                for suggestion in suggestions:
+                    if suggestion.get("type") == "city":
+                        # 도시 자체에 좌표가 있는 경우 바로 사용
+                        lat = suggestion.get("latitude")
+                        lon = suggestion.get("longitude")
+                        if lat is not None and lon is not None:
+                            return lat, lon
+                        
+                        # 도시 좌표가 없다면 포함된 공항들 중 최적의 공항 선택
+                        airports = suggestion.get("airports", [])
+                        if airports:
+                            # 지능형 필터링: 제안된 도시 이름과 공항의 city_name이 일치하는 공항을 우선 선택
+                            # 예: Tokyo 검색 시 Yokota(Fussa) 대신 Haneda(Tokyo) 선택 유도
+                            target_city = suggestion.get("name")
+                            matching_airports = [a for a in airports if a.get("city_name") == target_city]
+                            
+                            best_airport = matching_airports[0] if matching_airports else airports[0]
+                            lat = best_airport.get("latitude")
+                            lon = best_airport.get("longitude")
+                            if lat is not None and lon is not None:
+                                return lat, lon
+                
+                # 2. 도시 타입이 없거나 좌표를 못 찾은 경우, 다른 제안들 중 좌표가 있는 첫 번째 항목 사용
+                for suggestion in suggestions:
+                    lat = suggestion.get("latitude")
+                    lon = suggestion.get("longitude")
+                    if lat is not None and lon is not None:
+                        return lat, lon
+                
                 return None
-            
-            data = response.json()
-            suggestions = data.get("data", [])
-            
-            if not suggestions:
+            except Exception:
                 return None
-            
-            # 첫 번째 결과의 위도, 경도 추출
-            first_suggestion = suggestions[0]
-            lat = first_suggestion.get("latitude")
-            lon = first_suggestion.get("longitude")
-            
-            if lat is not None and lon is not None:
-                return lat, lon
-            return None
 
     async def execute(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         
@@ -61,16 +87,9 @@ class AccommodationAdapter(ApiTools):
             children = int(params.get("children", 0))
             child_ages = params.get("child_ages", [])
 
-            # 검증 로직
+            # 1. 기본적인 파라미터 검증
             if not all([check_in, check_out, city_query]):
                 return {"status": "error", "message": "check_in, check_out, city_name(또는 city_code)는 필수입니다."}
-            
-            # 위도/경도 좌표 추출
-            coords = await self._get_coordinates(city_query)
-            if not coords:
-                return {"status": "error", "message": f"'{city_query}'에 해당하는 위치 정보를 찾을 수 없습니다."}
-            
-            lat, lon = coords
 
             if children > 0 and len(child_ages) != children:
                 return {
@@ -78,21 +97,30 @@ class AccommodationAdapter(ApiTools):
                     "message": f"아이 인원({children}명)과 나이 정보({len(child_ages)}개)의 개수가 일치하지 않습니다."
                 }
 
-            # 2. Guests 리스트 구성 (type과 age를 가진 객체 리스트)
+            # 2. 위도/경도 좌표 추출
+            coords = await self._get_coordinates(city_query)
+            if not coords:
+                return {"status": "error", "message": f"'{city_query}'에 해당하는 위치 정보를 찾을 수 없습니다."}
+            
+            lat, lon = coords
+
+            # 3. Guests 리스트 구성
             guests = []
             for _ in range(adults):
                 guests.append({"type": "adult"})
             for age in child_ages:
                 guests.append({"type": "child", "age": int(age)})
 
-            # 3. 페이로드 구성 (위도/경도 기반 검색)
-            # radius는 5000(5km)으로 설정
+            # 4. 페이로드 구성 (문서에 따른 geographic_coordinates 중첩 구조)
+            # radius는 20km로 설정
             payload = {
                 "data": {
                     "location": {
-                        "latitude": lat,
-                        "longitude": lon,
-                        "radius": 5000
+                        "geographic_coordinates": {
+                            "latitude": lat,
+                            "longitude": lon
+                        },
+                        "radius": 20 # 검색 반경이 20km
                     },
                     "check_in_date": check_in,
                     "check_out_date": check_out,
@@ -140,13 +168,19 @@ class AccommodationAdapter(ApiTools):
                     else:
                         address_str = str(address_data)
 
+                    # Chain 이름 안전하게 추출
+                    chain_info = hotel.get("chain")
+                    chain_name = "Independent"
+                    if isinstance(chain_info, dict):
+                        chain_name = chain_info.get("name", "Independent")
+
                     processed_hotels.append({
                         "hotel_id": hotel.get("id"),
                         "name": hotel.get("name"),
                         "price": f"{res.get('cheapest_rate_total_amount')} {res.get('cheapest_rate_currency')}",
                         "rating": hotel.get("rating"),
                         "address": address_str,
-                        "chain": hotel.get("chain", {}).get("name", "Independent")
+                        "chain": chain_name
                     })
 
                 return {
