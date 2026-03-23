@@ -1,0 +1,57 @@
+name: Auto Close Issues
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  close-issues:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Close linked issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prBody = context.payload.pull_request.body || '';
+            const prTitle = context.payload.pull_request.title || '';
+            
+            // PR 본문과 제목에서 이슈 번호 찾기
+            const issueRegex = /(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s+#(\d+)/gi;
+            const matches = [...prBody.matchAll(issueRegex), ...prTitle.matchAll(issueRegex)];
+            
+            for (const match of matches) {
+              const issueNumber = parseInt(match[1]);
+              
+              try {
+                // 이슈 상태 확인
+                const issue = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber
+                });
+                
+                if (issue.data.state === 'open') {
+                  // 이슈 종료
+                  await github.rest.issues.update({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                    state: 'closed'
+                  });
+                  
+                  // 백로그 라벨 추가 (선택사항)
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                    labels: ['백로그']
+                  });
+                  
+                  console.log(`Closed issue #${issueNumber}`);
+                }
+              } catch (error) {
+                console.log(`Failed to close issue #${issueNumber}: ${error.message}`);
+              }
+            }
