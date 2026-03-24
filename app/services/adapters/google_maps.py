@@ -22,7 +22,7 @@ class GoogleMapsAdapter(ApiTools):
         if action == "find_route":
             return await self._find_route(params)
 
-        elif action == "search_place":
+        if action == "search_place":
             return await self._search_place(params)
 
         return {"status": "error", "message": f"지원하지 않는 액션: {action}"}
@@ -44,6 +44,11 @@ class GoogleMapsAdapter(ApiTools):
             "key": self.api_key,
         }
 
+        debug_params = {**query_params, "key": "***REDACTED***"}
+        print("\n[GoogleMapsAdapter] find_route 실제 요청 전송")
+        print(f"URL: {self.directions_base_url}")
+        print(f"Params: {debug_params}")
+
         async with httpx.AsyncClient(timeout=20.0) as client:
             try:
                 response = await client.get(self.directions_base_url, params=query_params)
@@ -52,6 +57,8 @@ class GoogleMapsAdapter(ApiTools):
             except httpx.RequestError as e:
                 return {"status": "error", "message": f"Google Maps Directions API 요청 실패: {str(e)}"}
 
+        print(f"[GoogleMapsAdapter] HTTP Status: {response.status_code}")
+
         try:
             data = response.json()
         except Exception:
@@ -59,6 +66,9 @@ class GoogleMapsAdapter(ApiTools):
                 "status": "error",
                 "message": f"API 응답이 JSON 형식이 아닙니다: {response.text[:200]}"
             }
+
+        print(f"[GoogleMapsAdapter] API Status: {data.get('status')}")
+        print(f"[GoogleMapsAdapter] 경로 개수: {len(data.get('routes', []))}")
 
         if response.status_code != 200:
             return {"status": "error", "message": f"HTTP 오류: {response.status_code}"}
@@ -119,6 +129,11 @@ class GoogleMapsAdapter(ApiTools):
             "key": self.api_key,
         }
 
+        debug_params = {**query_params, "key": "***REDACTED***"}
+        print("\n[GoogleMapsAdapter] search_place 실제 요청 전송")
+        print(f"URL: {self.places_text_search_url}")
+        print(f"Params: {debug_params}")
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
                 response = await client.get(self.places_text_search_url, params=query_params)
@@ -127,6 +142,8 @@ class GoogleMapsAdapter(ApiTools):
             except httpx.RequestError as e:
                 return {"status": "error", "message": f"Google Maps Places API 요청 실패: {str(e)}"}
 
+        print(f"[GoogleMapsAdapter] HTTP Status: {response.status_code}")
+
         try:
             data = response.json()
         except Exception:
@@ -134,6 +151,9 @@ class GoogleMapsAdapter(ApiTools):
                 "status": "error",
                 "message": f"API 응답이 JSON 형식이 아닙니다: {response.text[:200]}"
             }
+
+        print(f"[GoogleMapsAdapter] API Status: {data.get('status')}")
+        print(f"[GoogleMapsAdapter] 결과 개수: {len(data.get('results', []))}")
 
         if response.status_code != 200:
             return {"status": "error", "message": f"HTTP 오류: {response.status_code}"}
