@@ -1,5 +1,5 @@
 # 📍 MJU Travel AI Agent
-> **명지대학교 자연캠퍼스 가이드 및 사용자 맞춤형 여행 일정을 설계하는 스마트 AI 에이전트**
+> **사용자 맞춤형 여행 일정을 설계하는 스마트 AI 에이전트**
 
 본 프로젝트는 **FastAPI**와 **LangChain**을 기반으로 하며, 최신 **Gemini 3** 모델을 활용하여 사용자의 의도에 맞는 도구(Tool)를 스스로 선택하고 최적의 여행 경로를 제안합니다.
 
@@ -109,3 +109,4 @@ docker run -p 8000:8000 --env-file .env capstone-ai
 | `SUPABASE_URL` | Supabase 프로젝트 URL |
 | `SUPABASE_KEY` | Supabase API 키 |
 | `REDIS_URL` | Upstash Redis 접속 URL |
+=======
