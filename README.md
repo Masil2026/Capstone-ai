@@ -71,3 +71,41 @@ uvicorn main:app --reload --port 8000
 | 기능 | 접속 주소 | 비고 |
 | :--- | :--- | :--- |
 | **Swagger UI** | [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) | 가장 권장되는 대화형 문서 |
+
+---
+
+## 🐳 Docker 빌드 및 배포
+
+> 실제 배포는 `capstone-deploy` 레포에서 전체 서비스를 한번에 실행합니다.
+> 아래는 이 서비스만 단독으로 빌드/실행할 때 사용합니다.
+
+### 이미지 빌드
+
+```bash
+docker build -t capstone-ai .
+```
+
+### 단독 실행
+
+```bash
+docker run -p 8000:8000 --env-file .env capstone-ai
+```
+
+### 빌드 과정
+
+1. `python:3.12-slim` 이미지에서 `requirements.txt` 설치
+2. 소스 코드 복사 후 uvicorn으로 실행
+3. 포트 8000에서 서비스
+
+### 환경 변수 (`.env`)
+
+`.env` 파일을 프로젝트 루트에 생성하고 아래 값들을 채워넣으세요.
+
+| 변수 | 설명 |
+|------|------|
+| `GOOGLE_API_KEY` | Gemini API 키 |
+| `LANGCHAIN_API_KEY` | LangSmith API 키 |
+| `LANGCHAIN_TRACING_V2` | LangSmith 추적 활성화 (`true`) |
+| `SUPABASE_URL` | Supabase 프로젝트 URL |
+| `SUPABASE_KEY` | Supabase API 키 |
+| `REDIS_URL` | Upstash Redis 접속 URL |
