@@ -11,3 +11,9 @@ __pycache__/
 
 # 기타
 .vscode/
+
+# Claude / AI Assistant 관련
+.claude/
+.claude.json
+claude.log
+claude-settings.json
