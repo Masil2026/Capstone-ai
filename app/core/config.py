@@ -34,6 +34,10 @@ class Settings(BaseSettings):
 
     # --- Google Maps API ---
     GOOGLE_MAPS_API_KEY: str
+    
+    # CLERK KEY
+    CLERK_ISSUER: str
+    CLERK_JWKS_URL: str
 
     model_config = SettingsConfigDict(
         env_file=".env",
