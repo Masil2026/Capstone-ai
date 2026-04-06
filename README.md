@@ -110,3 +110,4 @@ docker run -p 8000:8000 --env-file .env capstone-ai
 | `SUPABASE_KEY` | Supabase API 키 |
 | `REDIS_URL` | Upstash Redis 접속 URL |
 =======
+
