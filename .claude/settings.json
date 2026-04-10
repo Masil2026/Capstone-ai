@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uvicorn*)",
+      "Bash(pytest*)",
+      "Bash(pip*)",
+      "Bash(pip3*)",
+      "Bash(python*)",
+      "Bash(python3*)",
+      "Bash(source venv/Scripts/activate*)",
+      "mcp__supabase-db__query"
+    ]
+  }
+}

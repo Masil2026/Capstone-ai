@@ -13,7 +13,7 @@ __pycache__/
 .vscode/
 
 # Claude / AI Assistant 관련
-.claude/
+.claude/settings.local.json
 .claude.json
 claude.log
 claude-settings.json
