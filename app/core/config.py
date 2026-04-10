@@ -3,12 +3,8 @@ from functools import lru_cache
 from typing import Optional
 
 class Settings(BaseSettings):
-    # --- OpenAI & LangChain ---
+    # --- AI / Gemini ---
     GOOGLE_API_KEY: str
-    LANGCHAIN_TRACING_V2: str   
-    LANGCHAIN_ENDPOINT: str  
-    LANGCHAIN_API_KEY: str
-    LANGCHAIN_PROJECT: str
 
     # --- Database & Redis ---
     DB_USER: str
