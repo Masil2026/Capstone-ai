@@ -1,7 +1,7 @@
 # 📍 MJU Travel AI Agent
 > **사용자 맞춤형 여행 일정을 설계하는 스마트 AI 에이전트**
 
-본 프로젝트는 **FastAPI**와 **LangChain**을 기반으로 하며, 최신 **Gemini 3** 모델을 활용하여 사용자의 의도에 맞는 도구(Tool)를 스스로 선택하고 최적의 여행 경로를 제안합니다.
+본 프로젝트는 **FastAPI**와 **pydantic-ai**를 기반으로 하며, 최신 **Gemini 3** 모델을 활용하여 사용자의 의도에 맞는 도구(Tool)를 스스로 선택하고 최적의 여행 경로를 제안합니다.
 
 ---
 
@@ -14,7 +14,7 @@
 * **Server:** Uvicorn
 
 ### **AI & LLM Strategy**
-* **Orchestration:** **LangChain** (Chains, Tool Binding, Agent Executor)
+* **Orchestration:** **pydantic-ai** (타입 안전한 Tool 정의, Agent, RunContext)
 * **Core Model:** **Google Gemini 3 Flash Preview** (`gemini-3-flash-preview`)
     * *Reason:* 에이전트의 복잡한 도구 호출(Function Calling) 시 넉넉한 무료 한도(15 RPM)와 빠른 응답 속도 확보.
 * **Observability:** **LangSmith** (LLM 추론 과정 추적 및 레이턴시 모니터링)
