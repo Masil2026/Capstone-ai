@@ -48,9 +48,8 @@ def _build_model(role: str):
 # 전처리 에이전트 — 비정형 데이터(Tavily, Instagram) 전처리·요약 전용
 preprocessor_agent = Agent(model=_build_model("preprocessor"))
 
-# TODO: 오케스트레이터 에이전트 — 의도 파악·도구 선택·최종 응답 생성
-#       구현 준비가 되면 아래 주석 해제
-# orchestrator_agent = Agent(model=_build_model("orchestrator"))
+# 오케스트레이터 에이전트 — 의도 파악·도구 선택·최종 응답 생성
+orchestrator_agent = Agent(model=_build_model("orchestrator"))
 
 # ---------------------------------------------------------------------------
 # Redis 클라이언트
