@@ -31,9 +31,11 @@ orchestrator_agent (GPT-4.1)
 ```python
 @dataclass
 class OrchestratorDeps:
-    ai_summary: str | None       # Redis memory.ai_summary
-    preferences: dict | None     # Redis memory.preferences
-    today: str                   # YYYY-MM-DD
+    ai_summary: str | None           # Redis memory.ai_summary
+    preferences: dict | None         # Redis memory.preferences
+    today: str                       # YYYY-MM-DD
+    similar_messages: list[dict]     # pgvector 유사 과거 메시지 최대 5개
+                                     # [{"role": "user"|"assistant", "content": "..."}]
 ```
 
 `@orchestrator_agent.system_prompt`로 등록된 함수가 위 값을 읽어 프롬프트를 동적으로 구성합니다.
