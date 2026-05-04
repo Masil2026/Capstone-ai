@@ -3,6 +3,19 @@ from jose import jwt, JWTError
 import httpx
 from app.core.config import settings
 
+_jwks_cache: dict | None = None
+
+
+async def _get_jwks() -> dict:
+    global _jwks_cache
+    if _jwks_cache is not None:
+        return _jwks_cache
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.get(settings.CLERK_JWKS_URL)
+        response.raise_for_status()
+        _jwks_cache = response.json()
+    return _jwks_cache
+
 
 async def get_current_user(request: Request) -> dict:
     """
@@ -14,10 +27,7 @@ async def get_current_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Authorization 헤더가 없거나 형식이 잘못되었습니다.")
 
     token = auth_header.split(" ", 1)[1]
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(settings.CLERK_JWKS_URL)
-        jwks = response.json()
+    jwks = await _get_jwks()
 
     try:
         claims = jwt.decode(
