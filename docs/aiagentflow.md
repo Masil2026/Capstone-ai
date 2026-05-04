@@ -4,20 +4,20 @@
 
 | 단계 | 주요 컴포넌트 | 역할 |
 |------|-------------|------|
-| 1. 의도 파악 | Orchestrator (Gemini 3 Pro) | 사용자 입력 분석 및 도구 선택 |
+| 1. 의도 파악 | Orchestrator (GPT-4o) | 사용자 입력 분석 및 도구 선택 |
 | 2. 데이터 수집 | Info Sources API | 실시간 외부 데이터 (날씨, 지도, 뉴스 등) 확보 |
 | 3. 데이터 분류 | FastAPI 전처리 레이어 | 데이터를 정형 / 비정형으로 분리 |
-| 4. 데이터 정제 | Elasticsearch & Gemini Flash | 비정형 데이터 필터링 및 요약 전처리 |
-| 5. 최종 생성 | Gemini 3 Pro | 컨텍스트를 반영한 최종 답변 / 일정 구성 |
+| 4. 데이터 정제 | Elasticsearch & GPT-4o-mini | 비정형 데이터 필터링 및 요약 전처리 |
+| 5. 최종 생성 | GPT-4o | 컨텍스트를 반영한 최종 답변 / 일정 구성 |
 
 ---
 
-## 1. 입력 및 의도 파악 — Orchestrator (Gemini 3 Pro)
+## 1. 입력 및 의도 파악 — Orchestrator (GPT-4o)
 
-사용자가 채팅 UI를 통해 텍스트나 이미지를 입력하면 **Gemini 3 Pro** 기반의 AI 에이전트가 가동됩니다.
+사용자가 채팅 UI를 통해 텍스트나 이미지를 입력하면 **GPT-4o** 기반의 AI 에이전트가 가동됩니다.
 
 - **입력 처리**: 사용자의 텍스트와 이미지를 분리하여 수용
-- **이미지 분석**: 이미지 입력 시 Gemini 내장 Google Search를 활용해 장소를 파악
+- **이미지 분석**: 이미지 입력 시 GPT-4o Vision을 활용해 장소를 파악
 - **오케스트레이션**: 파악된 정보를 바탕으로 어떤 도구(API)를 호출할지 결정
 
 ---
@@ -29,13 +29,13 @@
 **정형 데이터 소스**
 - 숙소 API (Duffel Stays)
 - 항공권 API (Duffel Air)
-- 렌트카 API
+- 렌트카 API (Duffel — 승인 대기 중)
 - 날씨 API (Open-Meteo)
 - 지도 API (Google Maps)
 
 **비정형 데이터 소스**
-- 웹 검색 (Tavily)
-- 트렌드 정보 (Instagram — Meta Graph API)
+- 웹 검색 (Tavily) — 여행지 정보·뉴스·트렌드 등 모든 비정형 검색을 담당
+  - Instagram Meta Graph API 및 기사 API는 승인 미완료로 Tavily로 대체
 
 ---
 
@@ -54,15 +54,15 @@
 
 **비정형 처리**
 - **Elasticsearch**: 비정형 데이터에서 필요한 정보를 필터링
-- **Gemini Flash**: 필터링된 비정형 데이터를 요약 / 전처리하여 메인 모델이 이해하기 쉬운 형태로 변환
+- **GPT-4o-mini**: 필터링된 비정형 데이터를 요약 / 전처리하여 메인 모델이 이해하기 쉬운 형태로 변환
 
 ---
 
-## 4. 최종 응답 생성 및 저장 — Gemini 3 Pro
+## 4. 최종 응답 생성 및 저장 — GPT-4o
 
 전처리가 완료된 정형 + 비정형 데이터가 메인 모델로 전달됩니다.
 
-- **최종 일정 생성**: Gemini 3 Pro가 전처리된 데이터 + Redis 단기 히스토리 + 장기 요약(ai_summary) + 사용자 취향(preferences)을 결합하여 최종 응답(일정)을 생성
+- **최종 일정 생성**: GPT-4o가 전처리된 데이터 + Redis 단기 히스토리 + 장기 요약(ai_summary) + 사용자 취향(preferences)을 결합하여 최종 응답(일정)을 생성
 - **데이터 피드백**: 일정 수립 완료 응답 시 Java 백엔드로 함께 반환 → Java가 `chat_rooms` 테이블의 `ai_summary`, `preferences` 갱신
 
 ---
@@ -111,10 +111,10 @@ Redis에 해당 chat_room_id 데이터 있는가?
 
 ### 5-3. 일정 수립 완료 시 저장 흐름
 
-일정 수립이 완료된 응답 시점에 Gemini가 갱신된 요약·취향을 생성하고 Java로 함께 반환합니다.
+일정 수립이 완료된 응답 시점에 GPT-4o가 갱신된 요약·취향을 생성하고 Java로 함께 반환합니다.
 
 ```
-Gemini Pro 최종 응답 (일정)
+GPT-4o 최종 응답 (일정)
     + 갱신된 ai_summary
     + 갱신된 preferences
          ↓

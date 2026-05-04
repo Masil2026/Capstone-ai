@@ -39,7 +39,7 @@ class WeatherAdapter(ApiTools):
 
             # 검증 로직
             # 주의: Open-Meteo Geocoding API는 한국어 도시명을 지원하지 않음
-            # Gemini가 영어 도시명으로 변환하여 전달해야 함 (예: "서울" → "Seoul")
+            # GPT-4o가 영어 도시명으로 변환하여 전달해야 함 (예: "서울" → "Seoul")
             if not city:
                 return {"status": "error", "message": "city는 필수입니다."}
 
@@ -197,7 +197,7 @@ class WeatherAdapter(ApiTools):
 
         # 2. 과거 날씨 조회 (get_historical_weather)
         # 여행일이 오늘로부터 16일 초과인 경우 — 작년 같은 시기 데이터를 참고용으로 조회
-        # Gemini 3 Pro가 이 데이터를 바탕으로 근거 있는 날씨 유추를 수행
+        # GPT-4o가 이 데이터를 바탕으로 근거 있는 날씨 유추를 수행
         elif action == "get_historical_weather":
             city = params.get("city")
             start_date = params.get("start_date")  # YYYY-MM-DD (작년 여행 시작일에 해당하는 날짜)

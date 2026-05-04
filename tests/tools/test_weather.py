@@ -35,7 +35,7 @@ def decode_weathercode(code: int) -> str:
 def get_coordinates(city: str) -> tuple[float, float]:
     """도시명 → 위경도 변환
 
-    주의: 한국어 도시명 미지원 — Gemini가 영어로 변환하여 전달해야 함
+    주의: 한국어 도시명 미지원 — GPT-4o가 영어로 변환하여 전달해야 함
     예) "서울" X → "Seoul" O, "오사카" X → "Osaka" O
     """
     response = httpx.get(GEOCODING_URL, params={"name": city, "count": 1})
