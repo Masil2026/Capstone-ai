@@ -20,6 +20,18 @@
 - **이미지 분석**: 이미지 입력 시 GPT-4o Vision을 활용해 장소를 파악
 - **오케스트레이션**: 파악된 정보를 바탕으로 어떤 도구(API)를 호출할지 결정
 
+**등록된 도구 (pydantic-ai `@tool_plain`)**
+
+| 도구 함수 | 연결 어댑터 | 설명 |
+|-----------|------------|------|
+| `search_flights` | Duffel Air | 항공권 검색 |
+| `search_hotels` | Duffel Stays | 숙소 검색 |
+| `search_web` | Tavily | 여행지 정보·뉴스·트렌드 검색 |
+| `get_weather` | Open-Meteo | 날씨 예보 (1~16일) |
+| `get_historical_weather` | Open-Meteo | 과거 날씨 조회 (16일 초과 여행일 참고용) |
+| `find_route` | Google Maps | 경로 조회 |
+| `search_place` | Google Maps | 장소 검색 |
+
 ---
 
 ## 2. 정보 소스 호출 및 데이터 수집 — Info Sources
@@ -29,7 +41,6 @@
 **정형 데이터 소스**
 - 숙소 API (Duffel Stays)
 - 항공권 API (Duffel Air)
-- 렌트카 API (Duffel — 승인 대기 중)
 - 날씨 API (Open-Meteo)
 - 지도 API (Google Maps)
 
@@ -50,7 +61,7 @@
 ### 3-2. 유형별 처리
 
 **정형 처리**
-- 항공, 숙소, 날씨, 렌트카 등 수치화된 데이터를 규격에 맞게 정리
+- 항공, 숙소, 날씨 등 수치화된 데이터를 규격에 맞게 정리
 
 **비정형 처리**
 - **Elasticsearch**: 비정형 데이터에서 필요한 정보를 필터링
