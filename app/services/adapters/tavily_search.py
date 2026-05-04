@@ -29,11 +29,16 @@ class TavilySearchAdapter(ApiTools):
                 "query": query,
                 "search_depth": params.get("search_depth", "basic"),  # basic(크레딧 1) / advanced(크레딧 2)
                 "max_results": int(params.get("max_results", 15)),  # ES 필터링 풀 확보를 위해 15개
-                # topic: "general"(기본) / "news" — 뉴스 특화 검색 시 사용
-                # include_domains: ["site.com"] — 특정 도메인만 검색 (신뢰 사이트 필터링)
-                # exclude_domains: ["site.com"] — 특정 도메인 제외
+                # topic: "general"(기본) / "news"(뉴스 특화) — Tavily가 지원하는 두 가지 값
+                "topic": params.get("topic", "general"),
                 # include_images: 이미지는 GPT-4o Vision으로 처리하므로 미사용
             }
+
+            # include_domains / exclude_domains — 값이 있을 때만 포함
+            if params.get("include_domains"):
+                payload["include_domains"] = params["include_domains"]
+            if params.get("exclude_domains"):
+                payload["exclude_domains"] = params["exclude_domains"]
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 try:
@@ -56,7 +61,7 @@ class TavilySearchAdapter(ApiTools):
                     return {"status": "error", "message": data.get("message", data.get("errors"))}
 
                 # 3. 결과 데이터 정제
-                # results는 ES 필터링 → GPT-4o-mini 전처리를 거쳐 정형화되므로 Tavily answer 미사용
+                # results는 GPT-4o-mini 전처리를 거쳐 정형화되므로 Tavily answer 미사용
                 results = [
                     {
                         "url": r["url"],
