@@ -7,8 +7,8 @@ python-dotenv==1.0.1
 pydantic-settings==2.5.2
 
 # --- AI & LLM ---
-pydantic-ai-slim==0.0.54
-google-genai==1.5.0
+pydantic-ai-slim[openai]==0.0.54
+openai>=1.0.0
 
 # --- Database & Cache ---
 sqlalchemy==2.0.32
