@@ -8,7 +8,7 @@ from app.services.travel_agent_service import TravelAgentService
 @pytest.mark.asyncio
 async def test_google_maps_find_route():
     adapter = GoogleMapsAdapter()
-    service = TravelAgentService(adapter)
+    service = TravelAgentService({"google_maps": adapter})
 
     mock_response = Mock()
     mock_response.status_code = 200
@@ -39,8 +39,9 @@ async def test_google_maps_find_route():
 
     with patch("httpx.AsyncClient.get", return_value=mock_response):
         result = await service.process_task(
-            action="find_route",
-            params={"origin": "Seoul", "dest": "Busan"}
+            "google_maps",
+            "find_route",
+            {"origin": "Seoul", "dest": "Busan"}
         )
 
     assert result["status"] == "success"
@@ -53,7 +54,7 @@ async def test_google_maps_find_route():
 @pytest.mark.asyncio
 async def test_google_maps_search_place():
     adapter = GoogleMapsAdapter()
-    service = TravelAgentService(adapter)
+    service = TravelAgentService({"google_maps": adapter})
 
     mock_response = Mock()
     mock_response.status_code = 200
@@ -79,8 +80,9 @@ async def test_google_maps_search_place():
 
     with patch("httpx.AsyncClient.get", return_value=mock_response):
         result = await service.process_task(
-            action="search_place",
-            params={"query": "스타벅스 강남"}
+            "google_maps",
+            "search_place",
+            {"query": "스타벅스 강남"}
         )
 
     assert result["status"] == "success"
@@ -92,9 +94,9 @@ async def test_google_maps_search_place():
 @pytest.mark.asyncio
 async def test_google_maps_invalid_action():
     adapter = GoogleMapsAdapter()
-    service = TravelAgentService(adapter)
+    service = TravelAgentService({"google_maps": adapter})
 
-    result = await service.process_task(action="invalid", params={})
+    result = await service.process_task("google_maps", "invalid", {})
 
     assert result["status"] == "error"
     assert "지원하지 않는 액션" in result["message"]
@@ -103,11 +105,12 @@ async def test_google_maps_invalid_action():
 @pytest.mark.asyncio
 async def test_google_maps_find_route_missing_params():
     adapter = GoogleMapsAdapter()
-    service = TravelAgentService(adapter)
+    service = TravelAgentService({"google_maps": adapter})
 
     result = await service.process_task(
-        action="find_route",
-        params={"origin": "Seoul"}
+        "google_maps",
+        "find_route",
+        {"origin": "Seoul"}
     )
 
     assert result["status"] == "error"
@@ -117,12 +120,9 @@ async def test_google_maps_find_route_missing_params():
 @pytest.mark.asyncio
 async def test_google_maps_search_place_missing_query():
     adapter = GoogleMapsAdapter()
-    service = TravelAgentService(adapter)
+    service = TravelAgentService({"google_maps": adapter})
 
-    result = await service.process_task(
-        action="search_place",
-        params={}
-    )
+    result = await service.process_task("google_maps", "search_place", {})
 
     assert result["status"] == "error"
     assert "query는 필수입니다." in result["message"]

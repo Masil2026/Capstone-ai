@@ -33,8 +33,8 @@ def _print_hotel_results(test_name, result):
 async def test_hotel_search_with_child():
     """[search_hotels] 아이 포함 숙소 검색 테스트 (도시명 사용)"""
     adapter = AccommodationAdapter()
-    service = TravelAgentService(adapter)
-    
+    service = TravelAgentService({"duffel_accommodation": adapter})
+
     # 도쿄 지역, 6월 15일~18일 (3박)
     params = {
         "city_name": "Tokyo",
@@ -47,8 +47,8 @@ async def test_hotel_search_with_child():
     }
 
     print(f"\n[Test 1] Searching Hotels in {params['city_name']} for {params['adults']} Adults & {params['children']} Child")
-    
-    result = await service.process_task(action="search_hotels", params=params)
+
+    result = await service.process_task("duffel_accommodation", "search_hotels", params)
     
     # 결과 출력
     _print_hotel_results("DUFFEL HOTEL SEARCH", result)
@@ -63,21 +63,21 @@ async def test_hotel_search_with_child():
 async def test_hotel_validation_error():
     """[search_hotels] 아이 인원수 불일치 에러 테스트"""
     adapter = AccommodationAdapter()
-    service = TravelAgentService(adapter)
-    
+    service = TravelAgentService({"duffel_accommodation": adapter})
+
     children_count = 2
     child_ages_list = [10]
-    
+
     # 아이는 1명인데 나이 정보를 안 보냈을 때
     invalid_params = {
         "city_name": "Tokyo",
         "check_in": "2026-06-15",
         "check_out": "2026-06-18",
-        "children": children_count, 
+        "children": children_count,
         "child_ages": child_ages_list
     }
 
-    result = await service.process_task(action="search_hotels", params=invalid_params)
+    result = await service.process_task("duffel_accommodation", "search_hotels", invalid_params)
     expected_message = f"아이 인원({children_count}명)과 나이 정보({len(child_ages_list)}개)의 개수가 일치하지 않습니다."
     
     assert result["status"] == "error"
@@ -88,7 +88,7 @@ async def test_hotel_validation_error():
 async def test_hotel_search_by_city_name():
     """[search_hotels] 도시명(osaka) 기반 좌표 추출 및 숙소 검색 테스트"""
     adapter = AccommodationAdapter()
-    service = TravelAgentService(adapter)
+    service = TravelAgentService({"duffel_accommodation": adapter})
 
     # 오사카 지역, 2026년 7월 1일~4일 (3박)
     params = {
@@ -101,7 +101,7 @@ async def test_hotel_search_by_city_name():
 
     print(f"\n[Test 3] Searching Hotels in {params['city_name']} using coordinate extraction")
 
-    result = await service.process_task(action="search_hotels", params=params)
+    result = await service.process_task("duffel_accommodation", "search_hotels", params)
 
     # 결과 출력
     _print_hotel_results("DUFFEL CITY NAME SEARCH", result)
