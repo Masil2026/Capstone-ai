@@ -30,6 +30,26 @@ class WeatherAdapter(ApiTools):
     def tool_name(self) -> str:
         return "weather"
 
+    async def _geocode(self, client: httpx.AsyncClient, city: str) -> Dict[str, Any] | Dict[str, str]:
+        """도시명 → 위경도 변환. 성공 시 location dict, 실패 시 {"status": "error", ...} 반환."""
+        try:
+            geo_response = await client.get(GEOCODING_URL, params={"name": city, "count": 1})
+        except httpx.TimeoutException:
+            return {"status": "error", "message": "Geocoding API 타임아웃 (30초 초과)"}
+
+        try:
+            geo_data = geo_response.json()
+        except Exception:
+            return {"status": "error", "message": f"Geocoding API 응답이 JSON 형식이 아닙니다: {geo_response.text[:100]}"}
+
+        if geo_response.status_code != 200:
+            return {"status": "error", "message": f"Geocoding API 오류: {geo_response.status_code}"}
+
+        if not geo_data.get("results"):
+            return {"status": "error", "message": f"도시를 찾을 수 없습니다: {city}"}
+
+        return geo_data["results"][0]
+
     async def execute(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
         # 1. 날씨 조회 (get_weather)
@@ -51,31 +71,10 @@ class WeatherAdapter(ApiTools):
 
             async with httpx.AsyncClient(timeout=30.0) as client:
 
-                # 1. Geocoding: 도시명 → 위경도 변환
-                try:
-                    geo_response = await client.get(GEOCODING_URL, params={"name": city, "count": 1})
-                except httpx.TimeoutException:
-                    # 네트워크 타임아웃 (30초 초과)
-                    return {"status": "error", "message": "Geocoding API 타임아웃 (30초 초과)"}
+                location = await self._geocode(client, city)
+                if "status" in location:
+                    return location
 
-                # JSONDecodeError 방지를 위한 예외 처리 (서버 장애 등)
-                try:
-                    geo_data = geo_response.json()
-                except Exception:
-                    return {
-                        "status": "error",
-                        "message": f"Geocoding API 응답이 JSON 형식이 아닙니다: {geo_response.text[:100]}"
-                    }
-
-                # HTTP 오류 (4xx, 5xx)
-                if geo_response.status_code != 200:
-                    return {"status": "error", "message": f"Geocoding API 오류: {geo_response.status_code}"}
-
-                # 도시를 찾지 못한 경우 — 한국어 도시명 입력 시에도 이 경로로 처리됨
-                if not geo_data.get("results"):
-                    return {"status": "error", "message": f"도시를 찾을 수 없습니다: {city}"}
-
-                location = geo_data["results"][0]
                 lat = location["latitude"]
                 lon = location["longitude"]
 
@@ -212,31 +211,10 @@ class WeatherAdapter(ApiTools):
 
             async with httpx.AsyncClient(timeout=30.0) as client:
 
-                # 1. Geocoding: 도시명 → 위경도 변환
-                try:
-                    geo_response = await client.get(GEOCODING_URL, params={"name": city, "count": 1})
-                except httpx.TimeoutException:
-                    # 네트워크 타임아웃 (30초 초과)
-                    return {"status": "error", "message": "Geocoding API 타임아웃 (30초 초과)"}
+                location = await self._geocode(client, city)
+                if "status" in location:
+                    return location
 
-                # JSONDecodeError 방지를 위한 예외 처리 (서버 장애 등)
-                try:
-                    geo_data = geo_response.json()
-                except Exception:
-                    return {
-                        "status": "error",
-                        "message": f"Geocoding API 응답이 JSON 형식이 아닙니다: {geo_response.text[:100]}"
-                    }
-
-                # HTTP 오류 (4xx, 5xx)
-                if geo_response.status_code != 200:
-                    return {"status": "error", "message": f"Geocoding API 오류: {geo_response.status_code}"}
-
-                # 도시를 찾지 못한 경우 — 한국어 도시명 입력 시에도 이 경로로 처리됨
-                if not geo_data.get("results"):
-                    return {"status": "error", "message": f"도시를 찾을 수 없습니다: {city}"}
-
-                location = geo_data["results"][0]
                 lat = location["latitude"]
                 lon = location["longitude"]
 
