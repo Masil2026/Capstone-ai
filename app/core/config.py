@@ -3,8 +3,15 @@ from functools import lru_cache
 from typing import Optional
 
 class Settings(BaseSettings):
-    # --- AI / Gemini ---
-    GOOGLE_API_KEY: str
+    # --- LLM Provider ---
+    # "openai" | "gemini" 중 하나. .env에서만 변경한다.
+    LLM_PROVIDER: str = "openai"
+    # None이면 provider 기본값 사용 (openai: gpt-4o / gpt-4o-mini, gemini: gemini-2.5-pro / gemini-2.0-flash)
+    ORCHESTRATOR_MODEL: Optional[str] = None
+    PREPROCESSOR_MODEL: Optional[str] = None
+
+    GPT_API_KEY: Optional[str] = None      # LLM_PROVIDER="openai" 일 때 필요
+    GOOGLE_API_KEY: Optional[str] = None   # LLM_PROVIDER="gemini" 일 때 필요
 
     # --- Database & Redis ---
     DB_USER: str

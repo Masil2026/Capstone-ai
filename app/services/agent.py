@@ -1,7 +1,5 @@
 # app/services/agent.py
 from pydantic_ai import Agent
-from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.providers.google_gla import GoogleGLAProvider
 from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelMessage
 import redis
 import json
@@ -9,32 +7,49 @@ from datetime import datetime, timezone
 from app.core.config import settings
 
 # ---------------------------------------------------------------------------
-# 모델 초기화
+# 모델 팩토리
 # ---------------------------------------------------------------------------
+# 모델/프로바이더를 바꾸려면 .env의 LLM_PROVIDER / ORCHESTRATOR_MODEL / PREPROCESSOR_MODEL만 수정하면 된다.
+# 코드 변경 불필요.
 
-# Flash — 비정형 데이터(Tavily, Instagram) 전처리·요약 전용
-flash_model = GeminiModel(
-    "gemini-2.0-flash",
-    provider=GoogleGLAProvider(api_key=settings.GOOGLE_API_KEY),
-)
+_PROVIDER_DEFAULTS = {
+    "openai":  {"orchestrator": "gpt-4o",        "preprocessor": "gpt-4o-mini"},
+    "gemini":  {"orchestrator": "gemini-2.5-pro", "preprocessor": "gemini-2.0-flash"},
+}
 
-# TODO: Pro — 오케스트레이터(의도 파악·도구 선택) 및 최종 응답 생성 전용
-#       현재 gemini-2.0-flash로 임시 대체. Pro 모델 확정 후 교체 필요.
-#       pro_model = GeminiModel(
-#           "gemini-2.5-pro",
-#           provider=GoogleGLAProvider(api_key=settings.GOOGLE_API_KEY),
-#       )
+def _build_model(role: str):
+    """role: 'orchestrator' | 'preprocessor'"""
+    provider = settings.LLM_PROVIDER
+    defaults = _PROVIDER_DEFAULTS.get(provider)
+    if defaults is None:
+        raise ValueError(f"지원하지 않는 LLM_PROVIDER: {provider!r}. 'openai' 또는 'gemini'를 사용하세요.")
+
+    if role == "orchestrator":
+        model_name = settings.ORCHESTRATOR_MODEL or defaults["orchestrator"]
+    elif role == "preprocessor":
+        model_name = settings.PREPROCESSOR_MODEL or defaults["preprocessor"]
+    else:
+        raise ValueError(f"알 수 없는 role: {role!r}")
+
+    if provider == "openai":
+        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+        return OpenAIModel(model_name, provider=OpenAIProvider(api_key=settings.GPT_API_KEY))
+
+    # provider == "gemini"
+    from pydantic_ai.models.gemini import GeminiModel
+    from pydantic_ai.providers.google_gla import GoogleGLAProvider
+    return GeminiModel(model_name, provider=GoogleGLAProvider(api_key=settings.GOOGLE_API_KEY))
 
 # ---------------------------------------------------------------------------
 # 에이전트
 # ---------------------------------------------------------------------------
 
-# Flash 에이전트 — 비정형 전처리용
-flash_agent = Agent(model=flash_model)
+# 전처리 에이전트 — 비정형 데이터(Tavily, Instagram) 전처리·요약 전용
+preprocessor_agent = Agent(model=_build_model("preprocessor"))
 
-# TODO: Pro 에이전트 — 오케스트레이터 및 최종 응답 생성용
-#       pro_model 확정 후 아래 주석 해제
-#       pro_agent = Agent(model=pro_model)
+# 오케스트레이터 에이전트 — 의도 파악·도구 선택·최종 응답 생성
+orchestrator_agent = Agent(model=_build_model("orchestrator"))
 
 # ---------------------------------------------------------------------------
 # Redis 클라이언트
