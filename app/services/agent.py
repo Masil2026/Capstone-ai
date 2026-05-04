@@ -13,7 +13,7 @@ from app.core.config import settings
 # 코드 변경 불필요.
 
 _PROVIDER_DEFAULTS = {
-    "openai":  {"orchestrator": "gpt-4o",        "preprocessor": "gpt-4o-mini"},
+    "openai":  {"orchestrator": "gpt-4.1",        "preprocessor": "gpt-4o-mini"},
     "gemini":  {"orchestrator": "gemini-2.5-pro", "preprocessor": "gemini-2.0-flash"},
 }
 
@@ -45,7 +45,7 @@ def _build_model(role: str):
 # 에이전트
 # ---------------------------------------------------------------------------
 
-# 전처리 에이전트 — 비정형 데이터(Tavily, Instagram) 전처리·요약 전용
+# 전처리 에이전트 — 비정형 데이터(Tavily) 전처리·요약 전용
 preprocessor_agent = Agent(model=_build_model("preprocessor"))
 
 # 오케스트레이터 에이전트 — 의도 파악·도구 선택·최종 응답 생성

@@ -35,7 +35,7 @@ def test_tavily_basic_search():
         # topic: "general"(기본) / "news" - 뉴스 특화 검색
         # include_domains: ["site.com"] - 특정 도메인만 검색 (신뢰 사이트 필터링)
         # exclude_domains: ["site.com"] - 특정 도메인 제외
-        # include_images: 이미지는 Gemini 3 Pro 내장 Google Search 활용 예정으로 미사용
+        # include_images: 이미지는 GPT-4o Vision으로 처리하므로 미사용
     })
     assert response.status_code == 200
     data = response.json()

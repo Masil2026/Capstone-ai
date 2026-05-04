@@ -32,7 +32,7 @@ class TavilySearchAdapter(ApiTools):
                 # topic: "general"(기본) / "news" — 뉴스 특화 검색 시 사용
                 # include_domains: ["site.com"] — 특정 도메인만 검색 (신뢰 사이트 필터링)
                 # exclude_domains: ["site.com"] — 특정 도메인 제외
-                # include_images: 이미지는 Gemini 내장 Google Search 활용 예정으로 미사용
+                # include_images: 이미지는 GPT-4o Vision으로 처리하므로 미사용
             }
 
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -56,7 +56,7 @@ class TavilySearchAdapter(ApiTools):
                     return {"status": "error", "message": data.get("message", data.get("errors"))}
 
                 # 3. 결과 데이터 정제
-                # results는 ES 필터링 → Gemini Flash 전처리를 거쳐 정형화되므로 Tavily answer 미사용
+                # results는 ES 필터링 → GPT-4o-mini 전처리를 거쳐 정형화되므로 Tavily answer 미사용
                 results = [
                     {
                         "url": r["url"],
