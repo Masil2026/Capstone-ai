@@ -106,7 +106,7 @@ FastAPI는 두 종류의 SSE 이벤트를 순서대로 전송합니다.
 ```
 
 > 임베딩 모델: OpenAI `text-embedding-3-small`, dim = `1536`
-> 
+> Spring Boot는 수신 후 `chat_messages.embedding`(pgvector)에 저장합니다.
 
 ### **memory 구조**
 

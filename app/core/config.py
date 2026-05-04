@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     CLERK_ISSUER: str
     CLERK_JWKS_URL: str
 
+    # --- Internal Token (Spring Boot ↔ FastAPI 서버 간 인증) ---
+    INTERNAL_TOKEN: str
+
+    # --- OpenAI Embeddings ---
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
