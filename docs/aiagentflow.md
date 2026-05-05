@@ -72,6 +72,22 @@ pgvector 코사인 유사도 검색 (read-only)
 유사도 상위 5개 과거 메시지 → orchestrator 컨텍스트에 포함
 ```
 
+### 2-2. 현재 일정 로드 — DB 조회 (read-only)
+
+일정 생성·수정 요청 시 orchestrator가 기존 dayPlans를 참고할 수 있도록 DB에서 현재 일정을 로드합니다.
+
+```
+roomId
+  ↓
+PostgreSQL read-only 조회
+  SELECT day_plans FROM itineraries WHERE room_id = :room_id
+  ↓
+current_itinerary → orchestrator 시스템 프롬프트에 주입
+  없으면 None (신규 일정 생성으로 처리)
+```
+
+> 일정이 없는 경우(첫 일정 생성)는 `current_itinerary = None`으로 처리하며, orchestrator가 전체 일정을 새로 생성합니다.
+
 ### 컨텍스트 구성
 
 orchestrator가 응답 생성 시 활용하는 컨텍스트:
@@ -82,8 +98,9 @@ orchestrator가 응답 생성 시 활용하는 컨텍스트:
 | preferences | 사용자 취향 JSON | Redis memory |
 | chat_history | 최근 20개 메시지 | Redis |
 | 유사 과거 메시지 | 의미적으로 유사한 과거 대화 최대 5개 | pgvector (read-only) |
+| current_itinerary | 현재 여행 일정 dayPlans | PostgreSQL (read-only) |
 
-> FastAPI의 DB 접근은 이 유사도 검색에 한정된 read-only입니다. 모든 DB 쓰기는 Spring Boot가 담당합니다.
+> FastAPI의 DB 접근은 유사도 검색 및 현재 일정 조회에 한정된 read-only입니다. 모든 DB 쓰기는 Spring Boot가 담당합니다.
 
 ---
 
@@ -96,15 +113,19 @@ orchestrator가 응답 생성 시 활용하는 컨텍스트:
 ```python
 @dataclass
 class OrchestratorDeps:
-    ai_summary: str | None           # 이전 대화 전체 요약 (Redis memory)
-    preferences: dict | None         # 사용자 취향 JSON (Redis memory)
-    today: str                       # YYYY-MM-DD — 날짜 계산 기준
-    similar_messages: list[dict]     # pgvector 유사 과거 메시지 (최대 5개)
-                                     # [{"role": "user"|"assistant", "content": "..."}]
+    ai_summary: str | None                      # 이전 대화 전체 요약 (Redis memory)
+    preferences: dict | None                    # 사용자 취향 JSON (Redis memory)
+    today: str                                  # YYYY-MM-DD — 날짜 계산 기준
+    similar_messages: list[dict]                # pgvector 유사 과거 메시지 (최대 5개)
+                                                # [{"role": "user"|"assistant", "content": "..."}]
+    current_itinerary: dict | None              # 현재 여행 일정 dayPlans (DB read-only)
+                                                # {"YYYY-MM-DD": [{"plan_name", "time", "place", "note"}]}
+                                                # 일정 없으면 None
 ```
 
 `@orchestrator_agent.system_prompt` 함수가 위 값을 읽어 자연어 프롬프트로 조합합니다.
 `similar_messages`는 "참고할 수 있는 과거 대화" 형태로 시스템 프롬프트에 삽입됩니다.
+`current_itinerary`는 일정 수정 시 기존 일정 맥락으로 주입됩니다. `None`이면 신규 생성으로 처리합니다.
 어댑터·도구 함수는 deps를 직접 참조하지 않습니다.
 
 ### 3-2. 도구 호출 및 스트리밍
@@ -114,10 +135,13 @@ orchestrator_agent.run_stream(user_input, deps=OrchestratorDeps(...), message_hi
   ↓
 필요시 도구 호출 (search_flights, search_web 등)
   ↓
+일정 생성/수정 완료 시 → submit_itinerary(day_plans={...}) 호출
+  (텍스트 스트리밍과 병행. dayPlans 구조체를 엔드포인트로 전달)
+  ↓
 텍스트 토큰 생성 → SSE event: chunk 실시간 전송
 ```
 
-등록된 도구 7개의 입력/출력 명세는 **[docs/agent_tools.md](agent_tools.md)** 참조.
+등록된 도구 8개의 입력/출력 명세는 **[docs/agent_tools.md](agent_tools.md)** 참조.
 
 ---
 
@@ -143,7 +167,10 @@ preprocessor_agent (GPT-4o-mini) → 핵심 정보 요약
 ## 5. 타입 판별 — classification_agent
 
 스트리밍이 완료된 후 `classification_agent`(GPT-4o-mini)가 전체 응답 텍스트를 분석하여
-`type`과 타입별 구조화 데이터를 추출합니다.
+`type`과 메모리 갱신 여부를 판단합니다.
+
+> `dayPlans` 구조체는 classification_agent가 추출하지 않습니다.
+> orchestrator가 일정을 생성/수정할 때 `submit_itinerary` 도구를 직접 호출하여 전달합니다.
 
 ```
 orchestrator 전체 응답 텍스트
@@ -152,7 +179,7 @@ orchestrator 전체 응답 텍스트
   ↓
 classification_agent.run(위 내용 포함 프롬프트, result_type=ResponseClassification)
   ↓
-ResponseClassification 구조체 반환
+ResponseClassification 구조체 반환 (type + 메모리 갱신 데이터)
 ```
 
 > `classification_agent`는 현재 `ai_summary`를 입력으로 받아 이번 대화를 반영한 새 `ai_summary`를 생성합니다.
@@ -188,17 +215,11 @@ ResponseClassification 구조체 반환
 
 ### ResponseClassification 구조
 
-```python
-class DayPlanItem(BaseModel):
-    plan_name: str
-    time: str           # "HH:MM ~ HH:MM"
-    place: str
-    note: str = ""
+`dayPlans`는 `submit_itinerary` 도구로 별도 캡처되므로 여기에 포함되지 않습니다.
 
+```python
 class ResponseClassification(BaseModel):
     type: Literal["chat", "itinerary", "change", "reservation", "cancel"]
-    # itinerary 타입
-    dayPlans: dict[str, list[DayPlanItem]] | None = None
     # change 타입
     startDate: str | None = None
     endDate: str | None = None
@@ -259,16 +280,17 @@ POST /api/v1/ai-messages (Spring Boot 요청)
   ↓
 [2] 사용자 메시지 임베딩 생성 → pgvector 유사 메시지 검색 (상위 5개)
   ↓
-[3] chat_history 로드 (Redis) + 컨텍스트 구성
-    (ai_summary + preferences + 유사 과거 메시지 + 최근 20개)
+[3] chat_history 로드 (Redis) + 현재 일정 로드 (DB, roomId 기준) + 컨텍스트 구성
+    (ai_summary + preferences + 유사 과거 메시지 + 최근 20개 + current_itinerary)
   ↓
 [4] orchestrator_agent.run_stream()
   ├─ 필요시 도구 호출 (search_web → preprocessor_agent 내부 호출)
+  ├─ 일정 생성/수정 시 → submit_itinerary(day_plans) 호출 → dayPlans 캡처
   └─ 텍스트 토큰 → event: chunk 반복 전송
   ↓
 [5] 스트리밍 완료 → 전체 응답 텍스트 확보
   ↓
-[6] classification_agent.run() → ResponseClassification 추출
+[6] classification_agent.run() → ResponseClassification 추출 (type + 메모리 갱신)
   ↓
 [7] AI 응답 임베딩 생성
   ↓
@@ -276,7 +298,7 @@ POST /api/v1/ai-messages (Spring Boot 요청)
   ↓
 [9] chat_history 저장 (Redis, 최대 20개)
   ↓
-[10] done 페이로드 구성 → event: done 전송
+[10] done 페이로드 구성 (캡처된 dayPlans 포함) → event: done 전송
 ```
 
 SSE 이벤트 포맷 및 `done` 페이로드 상세 구조는 **[docs/api/POST_v1_ai-messages.md](api/POST_v1_ai-messages.md)** 참조.
