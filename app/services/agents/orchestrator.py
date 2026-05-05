@@ -83,17 +83,19 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 ## 이번 요청: 예약 (reservation)
 
 처리 순서:
-1. 항공권 요청이면 search_flights, 숙소 요청이면 search_hotels를 호출한다.
-2. 검색 결과를 사용자에게 보여주고 선택을 유도한다.
-3. 예약이 확정되면 submit_reservation(reservation_type, detail, booking_url, total_price, currency 등)을 호출한다.""",
+1. 항공권 요청이면 search_flights, 숙소 요청이면 search_hotels를 호출해 옵션을 수집한다.
+2. 검색 결과를 사용자에게 보여준다.
+3. 실제 예약 확정(Duffel book API)은 현재 미구현이므로, 예약 의사가 확인되면
+   submit_reservation(reservation_type, detail, total_price, currency 등)을 호출해 정보를 시스템에 전달한다.""",
 
     "cancel": """\
 ## 이번 요청: 예약 취소 (cancel)
 
 처리 순서:
 1. 취소할 예약 ID와 취소 시각을 확인한다.
-2. submit_cancel(reservation_id, cancelled_at)을 호출한다.
-3. 텍스트 응답으로 취소 완료를 안내한다.""",
+2. 실제 취소 API(Duffel cancel API)는 현재 미구현이므로,
+   submit_cancel(reservation_id, cancelled_at)을 호출해 취소 정보를 시스템에 전달한다.
+3. 텍스트 응답으로 취소 접수 완료를 안내한다.""",
 
     "chat": """\
 ## 이번 요청: 일반 대화/질문 (chat)
