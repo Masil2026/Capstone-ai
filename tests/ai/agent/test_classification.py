@@ -2,6 +2,8 @@ import pytest
 from app.services.agents.classification import classification_agent
 from app.schemas.ai_message import ResponseClassification
 
+pytestmark = pytest.mark.llm
+
 
 def _print_result(test_name: str, result: ResponseClassification) -> None:
     print("\n" + "=" * 55)

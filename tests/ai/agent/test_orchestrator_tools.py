@@ -13,6 +13,8 @@ import pytest
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
+pytestmark = pytest.mark.llm
+
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
 import app.services.agents.orchestrator as _orch
@@ -248,7 +250,7 @@ async def test_orchestrator_change_budget(mock_tools):
 
 @pytest.mark.asyncio
 async def test_orchestrator_reservation_flight(mock_tools):
-    """항공권 예약 → search_flights + book_flight 순서 호출 확인"""
+    """항공권 예약 → book_flight 호출 확인 (검색+예약 내부 처리)"""
     deps = _make_deps("reservation")
     result = await orchestrator_agent.run(
         "인천에서 도쿄 5월 15일 출발 성인 2명 항공권 예약해줘.",
@@ -257,15 +259,14 @@ async def test_orchestrator_reservation_flight(mock_tools):
     tool_calls = _extract_tool_calls(result)
     _print_tool_calls("reservation_flight", tool_calls, result.data)
 
-    assert "search_flights" in tool_calls
     assert "book_flight" in tool_calls
-    assert "search_hotels" not in tool_calls
     assert "book_hotel" not in tool_calls
+    assert "search_flights" not in tool_calls
 
 
 @pytest.mark.asyncio
 async def test_orchestrator_reservation_hotel(mock_tools):
-    """숙소 예약 → search_hotels + book_hotel 순서 호출 확인"""
+    """숙소 예약 → book_hotel 호출 확인 (검색+예약 내부 처리)"""
     deps = _make_deps("reservation")
     result = await orchestrator_agent.run(
         "도쿄 신주쿠 5월 15일~18일 성인 2명 숙소 예약해줘.",
@@ -274,10 +275,9 @@ async def test_orchestrator_reservation_hotel(mock_tools):
     tool_calls = _extract_tool_calls(result)
     _print_tool_calls("reservation_hotel", tool_calls, result.data)
 
-    assert "search_hotels" in tool_calls
     assert "book_hotel" in tool_calls
-    assert "search_flights" not in tool_calls
     assert "book_flight" not in tool_calls
+    assert "search_hotels" not in tool_calls
 
 
 # ---------------------------------------------------------------------------

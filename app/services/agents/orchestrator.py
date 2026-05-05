@@ -82,17 +82,13 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
     "reservation": """\
 ## 이번 요청: 예약 (reservation)
 
-처리 순서 (search → book 순서는 항상 필요):
-1. search로 예약 대상 ID를 확보한다.
-   - 항공권이면 search_flights → 결과에서 offer_id 추출
-   - 숙소이면 search_hotels → 결과에서 hotel_id 추출
+처리 순서:
+1. 항공권이면 book_flight, 숙소이면 book_hotel을 호출한다.
+   - 검색과 예약이 도구 내부에서 자동으로 처리되므로 search_flights/search_hotels를 별도로 호출하지 않는다.
    - current_itinerary가 있으면 날짜·목적지·인원을 참고한다.
    - preferences에 선호 항공사·호텔 체인 정보가 있으면 참고한다.
-2. 검색 결과에서 조건에 맞는 옵션을 선택한 뒤 즉시 예약을 진행한다.
-   - 항공권이면 book_flight(offer_id, passengers) 호출
-   - 숙소이면 book_hotel(hotel_id, check_in, check_out, guests) 호출
    (현재 미구현 — status: todo 반환. 향후 Duffel booking API 연결 예정)
-3. submit_reservation(reservation_type, detail, total_price, currency 등)을 호출한다.""",
+2. submit_reservation(reservation_type, detail, total_price, currency 등)을 호출한다.""",
 
     "cancel": """\
 ## 이번 요청: 예약 취소 (cancel)
@@ -380,31 +376,45 @@ async def submit_cancel(reservation_id: str, cancelled_at: str) -> dict:
 
 @orchestrator_agent.tool_plain
 async def book_flight(
-    offer_id: str,
-    passengers: list[dict],
+    origin: str,
+    destination: str,
+    departure_date: str,
+    adults: int = 1,
+    children: int = 0,
+    child_ages: list[int] | None = None,
 ) -> dict:
-    """항공권 예약 실행. search_flights 결과의 offer_id로 예약 확정.
+    """항공권 검색 + 예약을 한 번에 처리. reservation 타입 전용.
 
-    - offer_id: search_flights 결과에서 선택한 항공편 ID
-    - passengers: 탑승객 정보 목록. 예) [{"type": "adult", "name": "홍길동"}]
-    - 반환: {status: "todo"} — Duffel booking API 연결 후 실제 예약 처리 예정
+    내부 동작: search_flights로 옵션 조회 → 최적 항공편 선택 → Duffel create_order 호출
+    LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
+
+    - origin/destination: 영문 도시명 또는 IATA 코드. 예) "Seoul", "ICN", "Tokyo", "NRT"
+    - departure_date: YYYY-MM-DD 형식
+    - children >= 1이면 child_ages 개수 일치 필요. 예) children=2, child_ages=[5, 8]
+    - 반환: {status: "todo"} — FlightAdapter.create_order 연결 후 실제 예약 처리 예정
     """
     return {"status": "todo", "message": "항공권 예약 API는 현재 개발 중입니다."}
 
 
 @orchestrator_agent.tool_plain
 async def book_hotel(
-    property_id: str,
+    city_name: str,
     check_in: str,
     check_out: str,
-    guests: list[dict],
+    adults: int = 1,
+    rooms: int = 1,
+    children: int = 0,
+    child_ages: list[int] | None = None,
 ) -> dict:
-    """숙소 예약 실행. search_hotels 결과의 property_id로 예약 확정.
+    """숙소 검색 + 예약을 한 번에 처리. reservation 타입 전용.
 
-    - property_id: search_hotels 결과에서 선택한 숙소 ID
+    내부 동작: search_hotels로 옵션 조회 → 최적 숙소 선택 → Duffel create_booking 호출
+    LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
+
+    - city_name: 영문 또는 한글 도시명. 예) "Tokyo", "도쿄"
     - check_in/check_out: YYYY-MM-DD 형식
-    - guests: 투숙객 정보 목록. 예) [{"type": "adult", "name": "홍길동"}]
-    - 반환: {status: "todo"} — Duffel accommodation booking API 연결 후 실제 예약 처리 예정
+    - children >= 1이면 child_ages 개수 일치 필요. 예) children=1, child_ages=[7]
+    - 반환: {status: "todo"} — AccommodationAdapter.create_booking 연결 후 실제 예약 처리 예정
     """
     return {"status": "todo", "message": "숙소 예약 API는 현재 개발 중입니다."}
 

@@ -1,6 +1,8 @@
 import pytest
 from app.services.agents.context import load_context
 
+pytestmark = pytest.mark.llm
+
 _ROOM_ID = "32f7e9e2-f6e6-4ead-9717-537f6768b2c1"
 _USER_MESSAGE = "도쿄 3박 4일 여행 일정 만들어줘"
 
