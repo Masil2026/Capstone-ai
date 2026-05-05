@@ -25,6 +25,7 @@ class OrchestratorDeps:
     today: str                      # YYYY-MM-DD — 날짜 계산 기준
     similar_messages: list[dict]    # pgvector 유사 과거 메시지 최대 5개
     current_itinerary: dict | None  # 현재 여행 일정 dayPlans (DB read-only, roomId 기준)
+    request_type: str               # classification_agent 판별 결과
 
 # ---------------------------------------------------------------------------
 # 오케스트레이터 에이전트
@@ -158,5 +159,47 @@ async def search_place(query: str) -> dict:
 
 @orchestrator_agent.tool_plain
 async def submit_itinerary(day_plans: dict[str, list[DayPlanItem]]) -> dict:
-    """일정 생성/수정 완료 시 반드시 호출. 구조화된 dayPlans를 시스템에 전달한다."""
+    """itinerary 타입 전용. 일정 생성/수정 완료 시 반드시 호출. 구조화된 dayPlans를 시스템에 전달한다."""
     return {"status": "success", "message": "일정이 저장되었습니다."}
+
+
+@orchestrator_agent.tool_plain
+async def submit_change(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    budget: float | None = None,
+    adult_count: int | None = None,
+    child_count: int | None = None,
+    child_ages: list[int] | None = None,
+) -> dict:
+    """change 타입 전용. 변경된 여행 기본 정보를 시스템에 전달한다. 변경된 필드만 포함."""
+    return {"status": "success", "message": "변경 정보가 저장되었습니다."}
+
+
+@orchestrator_agent.tool_plain
+async def submit_reservation(
+    reservation_type: str,
+    detail: dict,
+    booking_url: str | None = None,
+    external_ref_id: str | None = None,
+    total_price: float | None = None,
+    currency: str | None = None,
+    reserved_at: str | None = None,
+) -> dict:
+    """reservation 타입 전용. 예약 완료 후 예약 정보를 시스템에 전달한다."""
+    return {"status": "success", "message": "예약 정보가 저장되었습니다."}
+
+
+@orchestrator_agent.tool_plain
+async def submit_cancel(reservation_id: str, cancelled_at: str) -> dict:
+    """cancel 타입 전용. 취소 완료 후 취소 정보를 시스템에 전달한다."""
+    return {"status": "success", "message": "취소 정보가 저장되었습니다."}
+
+
+@orchestrator_agent.tool_plain
+async def update_memory(
+    ai_summary: str | None = None,
+    preferences: dict | None = None,
+) -> dict:
+    """모든 타입 공통. 대화 중 기억할 정보(취향·요약)가 감지될 때 호출한다."""
+    return {"status": "success", "message": "메모리가 갱신되었습니다."}

@@ -28,26 +28,8 @@ class DayPlanItem(BaseModel):
 
 
 class ResponseClassification(BaseModel):
+    # 구조화 데이터는 orchestrator의 submit_* 도구가 담당. 여기서는 type만 반환
     type: Literal["chat", "itinerary", "change", "reservation", "cancel"]
-
-    # change — dayPlans는 submit_itinerary 도구로 별도 캡처됨
-    startDate: str | None = None
-    endDate: str | None = None
-    budget: float | None = None
-    adultCount: int | None = None
-    childCount: int | None = None
-    childAges: list[int] | None = None
-
-    # reservation
-    reservation: dict[str, Any] | None = None
-
-    # cancel
-    reservationId: str | None = None
-    cancelledAt: str | None = None
-
-    # 메모리 갱신 (변경 없으면 None)
-    ai_summary: str | None = None
-    preferences: dict[str, Any] | None = None
 
 
 # ── done 이벤트 페이로드 ──────────────────────────────────────────────────────

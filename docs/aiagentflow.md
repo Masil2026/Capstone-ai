@@ -130,19 +130,18 @@ class OrchestratorDeps:
 
 ### 3-2. 타입별 orchestrator 처리 방식
 
-type에 따라 orchestrator가 호출하는 도구와 처리 방식이 다릅니다.
+classification_agent가 판별한 `type`은 `OrchestratorDeps.request_type`으로 전달됩니다.
+orchestrator는 이를 참고해 적절한 도구를 선택합니다.
 
-| type | 외부 API 도구 | orchestrator 동작 | Spring Boot 후처리 |
-|------|-------------|-----------------|------------------|
-| `itinerary` | search_place, search_web, get_weather 등 | 일정 생성·수정 → `submit_itinerary` 호출로 dayPlans 전달 | dayPlans로 DB 일정 교체 |
-| `change` | **없음** | 변경 내용을 텍스트로 확인 응답만. 도구 호출 불필요 | classification 추출값으로 DB 직접 업데이트 |
-| `reservation` | search_flights / search_hotels + 예약 API | 예약 완료 후 예약 정보 포함 응답 | reservations 테이블 저장 |
-| `cancel` | 취소 API | 취소 완료 후 응답 | reservations.status = "cancelled" |
-| `chat` | search_web, get_weather 등 (필요 시) | 정보 제공 텍스트 응답 | 추가 처리 없음 |
+| type | 외부 API 도구 | 구조화 데이터 전달 도구 | Spring Boot 후처리 |
+|------|-------------|----------------------|------------------|
+| `itinerary` | search_place, search_web, get_weather 등 | `submit_itinerary(day_plans)` | dayPlans로 DB 일정 교체 |
+| `change` | **없음** | `submit_change(startDate, budget, ...)` | change 값으로 DB 직접 업데이트 |
+| `reservation` | search_flights / search_hotels + 예약 API | `submit_reservation(...)` | reservations 테이블 저장 |
+| `cancel` | 취소 API | `submit_cancel(reservationId, cancelledAt)` | reservations.status = "cancelled" |
+| `chat` | search_web, get_weather 등 (필요 시) | 호출 없음 | 추가 처리 없음 |
 
-> `change`는 외부 API 없이 orchestrator가 사용자 요청을 확인하는 텍스트만 반환합니다.
-> classification_agent가 응답에서 변경된 값(startDate, endDate, budget 등)을 추출하면
-> Spring Boot가 자체 일정 수정 API에 해당 값을 담아 DB를 업데이트합니다.
+모든 type에서 사용자 취향·요약 정보가 감지되면 `update_memory(ai_summary, preferences)`를 호출합니다.
 
 ### 3-3. 도구 호출 및 스트리밍
 
@@ -182,94 +181,55 @@ preprocessor_agent (GPT-4o-mini) → 핵심 정보 요약
 
 ## 5. 타입 판별 — classification_agent
 
-스트리밍이 완료된 후 `classification_agent`(GPT-4o-mini)가 전체 응답 텍스트를 분석하여
-`type`과 메모리 갱신 여부를 판단합니다.
-
-> `dayPlans` 구조체는 classification_agent가 추출하지 않습니다.
-> orchestrator가 일정을 생성/수정할 때 `submit_itinerary` 도구를 직접 호출하여 전달합니다.
+`classification_agent`(GPT-4o-mini)는 **orchestrator 실행 전에** 사용자 메시지만 보고 `type`을 판별합니다.
+구조화 데이터(dayPlans, change 필드, reservation, memory 등)는 모두 orchestrator의 도구 호출이 담당합니다.
 
 ```
-orchestrator 전체 응답 텍스트
-  + 현재 ai_summary (Redis memory, 갱신 기준 판단용)
-  + 사용자 메시지 원문
+사용자 메시지
   ↓
-classification_agent.run(위 내용 포함 프롬프트, result_type=ResponseClassification)
+classification_agent.run(user_message, result_type=ResponseClassification)
   ↓
-ResponseClassification 구조체 반환 (type + 메모리 갱신 데이터)
+type 반환 ("chat" | "itinerary" | "change" | "reservation" | "cancel")
 ```
 
-> `classification_agent`는 현재 `ai_summary`를 입력으로 받아 이번 대화를 반영한 새 `ai_summary`를 생성합니다.
-> 변경이 없거나 `chat` 타입처럼 요약할 내용이 없으면 `ai_summary = None`을 반환합니다.
+판별된 `type`은 `OrchestratorDeps.request_type`으로 전달되어 orchestrator가 어떤 도구를 호출할지 결정하는 데 활용됩니다.
 
 ### 타입 판별 기준
 
-| type | 기준 |
-|------|------|
-| `itinerary` | 일정 초기 생성 또는 기존 일정의 장소·순서·시간 수정 |
-| `change` | 여행 기본 정보 변경 (날짜·예산·인원 등) |
+| type | 사용자 메시지 기준 |
+|------|-----------------|
+| `itinerary` | 일정 신규 생성 또는 장소·순서·시간 수정 요청 |
+| `change` | 여행 날짜·예산·인원(성인/아이 수·나이) 변경 요청 (목적지 변경 없음) |
 | `reservation` | 항공권 또는 숙소 예약 요청 |
 | `cancel` | 예약 취소 요청 |
-| `chat` | 위 4가지에 해당하지 않는 일반 대화·질문 |
+| `chat` | 위 4가지에 해당하지 않는 일반 대화·질문·정보 요청 |
 
 ### itinerary vs change 구분
 
-- **itinerary**: "경복궁 대신 창덕궁으로 바꿔줘", "3일차 일정 추가해줘" → `dayPlans` 반환
-- **change**: "여행 날짜 5월 3일부터 7일로 바꿔줘", "예산 100만원으로 늘려줘" → `startDate`, `budget` 등 반환
-
-### dayPlans 반환 단위
-
-- **itinerary (신규 생성)**: 전체 여행 기간 모든 날짜의 `dayPlans` 반환
-- **itinerary (수정)**: 수정된 날짜의 `dayPlans`만 반환. Spring Boot가 해당 날짜 단위로 전체 교체
-
-```json
-"dayPlans": {
-  "2026-05-04": [
-    { "plan_name": "창덕궁 방문", "time": "09:00 ~ 12:00", "place": "창덕궁", "note": "" }
-  ]
-}
-```
+- **itinerary**: "경복궁 대신 창덕궁으로 바꿔줘", "3일차 일정 추가해줘" → 일정 내용 변경
+- **change**: "여행 날짜 5월 3일부터 7일로 바꿔줘", "예산 100만원으로 늘려줘" → 여행 기본 정보 변경
 
 ### ResponseClassification 구조
 
-`dayPlans`는 `submit_itinerary` 도구로 별도 캡처되므로 여기에 포함되지 않습니다.
+type만 반환합니다. 구조화 데이터는 orchestrator의 submit_* 도구가 담당합니다.
 
 ```python
 class ResponseClassification(BaseModel):
     type: Literal["chat", "itinerary", "change", "reservation", "cancel"]
-    # change 타입
-    startDate: str | None = None
-    endDate: str | None = None
-    budget: float | None = None
-    adultCount: int | None = None
-    childCount: int | None = None
-    childAges: list[int] | None = None
-    # reservation 타입
-    reservation: dict[str, Any] | None = None
-    # cancel 타입
-    reservationId: str | None = None
-    cancelledAt: str | None = None
-    # 메모리 갱신 (모든 타입 공통, 변경 없으면 None)
-    ai_summary: str | None = None
-    preferences: dict[str, Any] | None = None
 ```
 
-### ResponseClassification → done 페이로드 매핑
+### done 페이로드 데이터 출처
 
-`ResponseClassification`은 classification_agent 내부 Python 구조체입니다.
-FastAPI가 이를 `done` 이벤트 JSON으로 변환할 때 아래 규칙을 따릅니다.
-
-| ResponseClassification 필드 | done 이벤트 JSON 위치 | 변환 규칙 |
-|----------------------------|--------------------|---------|
-| `type` | `done.type` | 그대로 |
-| `dayPlans` | `done.itinerary.dayPlans` | `itinerary` 키 아래 중첩 |
-| `startDate`, `endDate`, `budget`, `adultCount`, `childCount`, `childAges` | `done.change.*` | `change` 키 아래 중첩, `None`인 필드는 제외 |
-| `reservation` | `done.reservation` | 그대로 |
-| `reservationId`, `cancelledAt` | `done.cancel.*` | `cancel` 키 아래 중첩 |
-| `ai_summary` | `done.memory.aiSummary` | snake_case → camelCase, `None`이면 `done.memory = null` |
-| `preferences` | `done.memory.preferences` | `ai_summary`와 함께 `memory` 객체로 묶음 |
-
-> `done.memory`는 `ai_summary`와 `preferences` 둘 다 `None`이면 `null`로 전송합니다.
-> 둘 중 하나라도 값이 있으면 `{"aiSummary": ..., "preferences": ...}` 객체로 전송합니다.
+| done 필드 | 출처 |
+|-----------|------|
+| `type` | classification_agent |
+| `itinerary.dayPlans` | orchestrator → `submit_itinerary` 도구 캡처 |
+| `change.*` | orchestrator → `submit_change` 도구 캡처 |
+| `reservation` | orchestrator → `submit_reservation` 도구 캡처 |
+| `cancel.*` | orchestrator → `submit_cancel` 도구 캡처 |
+| `memory` | orchestrator → `update_memory` 도구 캡처 (`None`이면 `done.memory = null`) |
+| `userMessage.embedding` | 요청 시작 시 생성 |
+| `assistantMessage.embedding` | 스트리밍 완료 후 생성 |
 
 ---
 
@@ -297,24 +257,25 @@ POST /api/v1/ai-messages (Spring Boot 요청)
 [2] 사용자 메시지 임베딩 생성 → pgvector 유사 메시지 검색 (상위 5개)
   ↓
 [3] chat_history 로드 (Redis) + 현재 일정 로드 (DB, roomId 기준) + 컨텍스트 구성
-    (ai_summary + preferences + 유사 과거 메시지 + 최근 20개 + current_itinerary)
   ↓
-[4] orchestrator_agent.run_stream()
-  ├─ 필요시 도구 호출 (search_web → preprocessor_agent 내부 호출)
-  ├─ 일정 생성/수정 시 → submit_itinerary(day_plans) 호출 → dayPlans 캡처
+[4] classification_agent.run(user_message) → type 판별
+    (빠름. orchestrator 전에 완료하여 request_type으로 전달)
+  ↓
+[5] orchestrator_agent.run_stream(user_message, deps={..., request_type})
+  ├─ type에 맞는 외부 API 도구 호출
+  ├─ 구조화 데이터 전달 도구 호출 (submit_itinerary / submit_change / submit_reservation / submit_cancel)
+  ├─ 필요시 update_memory(ai_summary, preferences) 호출
   └─ 텍스트 토큰 → event: chunk 반복 전송
   ↓
-[5] 스트리밍 완료 → 전체 응답 텍스트 확보
-  ↓
-[6] classification_agent.run() → ResponseClassification 추출 (type + 메모리 갱신)
+[6] 스트리밍 완료 → 도구 캡처 결과 확보
   ↓
 [7] AI 응답 임베딩 생성
   ↓
-[8] memory 갱신 판단 → Redis 업데이트 (변경 있을 때만)
+[8] update_memory 캡처 결과 → Redis 업데이트 (캡처된 경우에만)
   ↓
 [9] chat_history 저장 (Redis, 최대 20개)
   ↓
-[10] done 페이로드 구성 (캡처된 dayPlans 포함) → event: done 전송
+[10] done 페이로드 구성 (type + 캡처 결과 조합) → event: done 전송
 ```
 
 SSE 이벤트 포맷 및 `done` 페이로드 상세 구조는 **[docs/api/POST_v1_ai-messages.md](api/POST_v1_ai-messages.md)** 참조.
