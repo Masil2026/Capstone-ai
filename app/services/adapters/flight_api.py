@@ -26,15 +26,21 @@ class FlightAdapter(ApiTools):
         headers = self._get_headers()
         params = {"query": query}
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url, headers=headers, params=params)
-            data = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+        except (httpx.TimeoutException, httpx.RequestError):
+            return None
 
-            if response.status_code != 200 or not data.get("data"):
-                return None
-            
-            # 첫 번째 항목의 iata_code 추출
-            return data["data"][0].get("iata_code")
+        try:
+            data = response.json()
+        except Exception:
+            return None
+
+        if response.status_code != 200 or not data.get("data"):
+            return None
+
+        return data["data"][0].get("iata_code")
 
     async def execute(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
 

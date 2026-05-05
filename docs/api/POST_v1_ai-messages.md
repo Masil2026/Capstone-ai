@@ -106,7 +106,7 @@ FastAPI는 두 종류의 SSE 이벤트를 순서대로 전송합니다.
 ```
 
 > 임베딩 모델: OpenAI `text-embedding-3-small`, dim = `1536`
-> 
+> Spring Boot는 수신 후 `chat_messages.embedding`(pgvector)에 저장합니다.
 
 ### **memory 구조**
 
@@ -314,7 +314,7 @@ FastAPI는 두 종류의 SSE 이벤트를 순서대로 전송합니다.
 
 | Field | Required | Type | Description |
 | --- | --- | --- | --- |
-| type | Y | `String` | `"flight"` / `"accommodation"` / `"car_rental"` |
+| type | Y | `String` | `"flight"` / `"accommodation"` |
 | bookingUrl | N | `String` | AI가 제공한 예약 링크 |
 | externalRefId | N | `String` | 외부 예약 번호 |
 | detail | Y | `Object` | 예약 유형별 상세. `POST /api/v1/reservations` 명세 §4.2 구조와 동일 |
@@ -383,7 +383,7 @@ FastAPI는 두 종류의 SSE 이벤트를 순서대로 전송합니다.
 5. **외부 API 호출 및 전처리**: 필요한 경우 외부 API를 호출하고 서비스 payload 구조에 맞게 응답을 전처리합니다.
     - 장소 검색
     - 일정 생성/수정에 필요한 장소 정보 조회
-    - 항공/숙소/렌터카 예약 후보 조회
+    - 항공/숙소 예약 후보 조회
     - 날씨, 영업시간, 위치 정보 조회
     - 날짜/시간 포맷 정규화
     - 가격/통화 정규화

@@ -24,15 +24,15 @@ def _print_flight_results(test_name, result):
 async def test_flight_search_with_child():
     """[search_flights] 아이 포함 검색 테스트"""
     adapter = FlightAdapter()
-    service = TravelAgentService(adapter)
-    
+    service = TravelAgentService({"duffel_flight": adapter})
+
     params = {
         "origin": "seoul", "destination": "tokyo",
         "departure_date": "2026-05-15",
         "adults": 1, "children": 1, "child_ages": [5]
     }
 
-    result = await service.process_task(action="search_flights", params=params)
+    result = await service.process_task("duffel_flight", "search_flights", params)
     
     # 결과 출력
     _print_flight_results("CHILD INCLUDED SEARCH", result)
@@ -46,15 +46,15 @@ async def test_flight_search_with_child():
 async def test_flight_search_adults_only():
     """[search_flights] 성인만으로 검색 테스트"""
     adapter = FlightAdapter()
-    service = TravelAgentService(adapter)
-    
+    service = TravelAgentService({"duffel_flight": adapter})
+
     params = {
         "origin": "seoul", "destination": "osaka",
         "departure_date": "2026-06-20",
         "adults": 2
     }
 
-    result = await service.process_task(action="search_flights", params=params)
+    result = await service.process_task("duffel_flight", "search_flights", params)
     
     # 결과 출력
     _print_flight_results("ADULTS ONLY SEARCH", result)
@@ -68,20 +68,20 @@ async def test_flight_search_adults_only():
 async def test_flight_validation_error():
     """[search_flights] 유효성 검사 에러 테스트(아이는 2명인데, 나이를 1개만 입력할 시에 에러)"""
     adapter = FlightAdapter()
-    service = TravelAgentService(adapter)
-    
+    service = TravelAgentService({"duffel_flight": adapter})
+
     children_count = 2
     child_ages_list = [10]
-    
+
     invalid_params = {
-        "origin": "seoul", 
+        "origin": "seoul",
         "destination": "tokyo",
         "departure_date": "2026-06-15",
-        "children": children_count, 
+        "children": children_count,
         "child_ages": child_ages_list
     }
 
-    result = await service.process_task(action="search_flights", params=invalid_params)
+    result = await service.process_task("duffel_flight", "search_flights", invalid_params)
     expected_message = f"아이 인원({children_count}명)과 나이 정보({len(child_ages_list)}개)의 개수가 일치하지 않습니다."
     
     assert result["status"] == "error"
@@ -92,17 +92,17 @@ async def test_flight_validation_error():
 async def test_flight_search_with_city_names():
     """[search_flights] 도시명(seoul, osaka)을 입력했을 때 IATA 코드로 자동 변환되어 검색되는지 테스트"""
     adapter = FlightAdapter()
-    service = TravelAgentService(adapter)
-    
+    service = TravelAgentService({"duffel_flight": adapter})
+
     # IATA 코드 대신 도시명을 입력
     params = {
-        "origin": "seoul", 
+        "origin": "seoul",
         "destination": "osaka",
         "departure_date": "2026-06-25",
         "adults": 1
     }
 
-    result = await service.process_task(action="search_flights", params=params)
+    result = await service.process_task("duffel_flight", "search_flights", params)
     
     # 결과 출력 (필요 시 주석 해제)
     _print_flight_results("CITY NAME SEARCH (seoul -> osaka)", result)

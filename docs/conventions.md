@@ -120,11 +120,17 @@ print(f"[{클래스명}] HTTP Status: {response.status_code}")
 ## 서비스 계층
 
 `TravelAgentService`는 `ApiTools` 인터페이스만 의존한다. 어댑터를 직접 import하지 않는다.
+생성자는 `tool_name → 어댑터` 딕셔너리를 받고, `process_task`는 `tool_name`을 첫 번째 인자로 요구한다.
 
 ```python
-service = TravelAgentService(FlightAdapter())
-result = await service.process_task(action="search_flights", params={...})
+service = TravelAgentService({
+    "duffel_flight": FlightAdapter(),
+    "duffel_accommodation": AccommodationAdapter(),
+})
+result = await service.process_task("duffel_flight", "search_flights", params={...})
 ```
+
+`agent.py`의 `_service` 싱글턴이 모든 어댑터를 보유하며, `@orchestrator_agent.tool_plain`으로 등록된 도구 함수들이 이를 통해 API를 호출한다.
 
 ---
 
@@ -140,6 +146,32 @@ answer = result.output        # ❌ AttributeError 발생
 # 대화 히스토리 누적
 history = result.all_messages()
 result2 = await agent.run("다음 입력", message_history=history)
+```
+
+## pydantic-ai 스트리밍 (SSE용)
+
+`agent.run_stream()`은 비동기 컨텍스트 매니저로 사용한다. 스트리밍 완료 후 `result.data`로 전체 응답을 얻는다.
+
+```python
+from fastapi.responses import StreamingResponse
+import json
+
+async def _stream():
+    async with agent.run_stream("입력", message_history=history) as result:
+        async for chunk in result.stream_text(delta=True):  # delta=True: 증분 텍스트만
+            yield f"event: chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+        full_response = result.data   # 스트리밍 완료 후 전체 텍스트
+
+return StreamingResponse(_stream(), media_type="text/event-stream")
+```
+
+`result_type`이 지정된 에이전트 (`classification_agent`)는 `run_stream` 대신 `run`을 사용한다.
+구조화 출력은 스트리밍이 아닌 단일 호출로 처리한다.
+
+```python
+# classification_agent — result_type=ResponseClassification 지정된 경우
+result = await classification_agent.run("분류할 텍스트")
+classification: ResponseClassification = result.data
 ```
 
 ---
