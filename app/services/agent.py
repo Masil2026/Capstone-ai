@@ -5,6 +5,7 @@ from redis import asyncio as aioredis
 import json
 from datetime import datetime, timezone
 from app.core.config import settings
+from app.schemas.ai_message import ResponseClassification
 
 # ---------------------------------------------------------------------------
 # 모델 팩토리
@@ -50,6 +51,41 @@ preprocessor_agent = Agent(model=_build_model("preprocessor"))
 
 # 오케스트레이터 에이전트 — 의도 파악·도구 선택·최종 응답 생성
 orchestrator_agent = Agent(model=_build_model("orchestrator"))
+
+# 타입 판별 에이전트 — 스트리밍 완료 후 응답 의도 분류 (구조화 출력, 스트리밍 없음)
+_CLASSIFICATION_SYSTEM_PROMPT = """\
+당신은 여행 AI 어시스턴트의 응답을 분석하여 의도를 분류하고 구조화된 데이터를 추출하는 전문가입니다.
+
+## 분류 기준
+
+| type | 기준 |
+|------|------|
+| itinerary | 여행 일정 초기 생성 또는 기존 일정의 장소·순서·시간 수정 |
+| change | 여행 시작일·종료일·예산·성인 수·아이 수·아이 나이 변경 (목적지 변경은 불가) |
+| reservation | 항공권 또는 숙소 예약 완료 |
+| cancel | 예약 취소 완료 |
+| chat | 위 4가지에 해당하지 않는 일반 대화·질문·정보 제공 |
+
+## 필드 작성 규칙
+
+- **itinerary**: dayPlans에 수정/생성된 날짜만 포함. 형식: {"YYYY-MM-DD": [{plan_name, time("HH:MM ~ HH:MM"), place, note}]}
+- **change**: 변경된 필드만 포함. 변경되지 않은 필드는 null. 포함 가능한 필드: startDate(YYYY-MM-DD), endDate(YYYY-MM-DD), budget(숫자), adultCount, childCount, childAges(나이 배열). 목적지(destination)는 변경 불가이므로 절대 포함하지 않는다.
+- **reservation**: reservation 객체에 예약 정보 포함.
+- **cancel**: reservationId와 cancelledAt 포함.
+- **chat**: 타입별 조건부 필드는 모두 null.
+
+## 메모리 갱신 규칙
+
+- ai_summary: 이번 대화를 반영한 새 요약. 새롭게 기억할 정보가 없으면 null.
+- preferences: 감지된 사용자 취향 전체 (기존 + 신규 병합). 변화 없으면 null.
+- type이 chat이더라도 취향 정보가 발견되면 갱신한다.
+"""
+
+classification_agent = Agent(
+    model=_build_model("preprocessor"),
+    result_type=ResponseClassification,
+    system_prompt=_CLASSIFICATION_SYSTEM_PROMPT,
+)
 
 # ---------------------------------------------------------------------------
 # Redis 클라이언트
