@@ -82,20 +82,27 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
     "reservation": """\
 ## 이번 요청: 예약 (reservation)
 
-처리 순서:
-1. 항공권 요청이면 search_flights, 숙소 요청이면 search_hotels를 호출해 옵션을 수집한다.
-2. 검색 결과를 사용자에게 보여준다.
-3. 실제 예약 확정(Duffel book API)은 현재 미구현이므로, 예약 의사가 확인되면
-   submit_reservation(reservation_type, detail, total_price, currency 등)을 호출해 정보를 시스템에 전달한다.""",
+처리 순서 (search → book 순서는 항상 필요):
+1. search로 예약 대상 ID를 확보한다.
+   - 항공권이면 search_flights → 결과에서 offer_id 추출
+   - 숙소이면 search_hotels → 결과에서 hotel_id 추출
+   - current_itinerary가 있으면 날짜·목적지·인원을 참고한다.
+   - preferences에 선호 항공사·호텔 체인 정보가 있으면 참고한다.
+2. 검색 결과에서 조건에 맞는 옵션을 선택한 뒤 즉시 예약을 진행한다.
+   - 항공권이면 book_flight(offer_id, passengers) 호출
+   - 숙소이면 book_hotel(hotel_id, check_in, check_out, guests) 호출
+   (현재 미구현 — status: todo 반환. 향후 Duffel booking API 연결 예정)
+3. submit_reservation(reservation_type, detail, total_price, currency 등)을 호출한다.""",
 
     "cancel": """\
 ## 이번 요청: 예약 취소 (cancel)
 
 처리 순서:
-1. 취소할 예약 ID와 취소 시각을 확인한다.
-2. 실제 취소 API(Duffel cancel API)는 현재 미구현이므로,
-   submit_cancel(reservation_id, cancelled_at)을 호출해 취소 정보를 시스템에 전달한다.
-3. 텍스트 응답으로 취소 접수 완료를 안내한다.""",
+1. 취소 대상이 항공권인지 숙소인지 확인한다.
+2. 항공권이면 cancel_flight(order_id), 숙소이면 cancel_hotel(booking_id)을 호출한다.
+   (현재 미구현 — status: todo 반환. 향후 Duffel cancel API 연결 예정)
+3. submit_cancel(reservation_id, cancelled_at)을 호출해 취소 정보를 시스템에 전달한다.
+4. 텍스트 응답으로 취소 접수 완료를 안내한다.""",
 
     "chat": """\
 ## 이번 요청: 일반 대화/질문 (chat)
@@ -343,14 +350,83 @@ async def submit_reservation(
     currency: str | None = None,
     reserved_at: str | None = None,
 ) -> dict:
-    """reservation 타입 전용. 예약 완료 후 예약 정보를 시스템에 전달한다."""
+    """reservation 타입 전용. 예약 완료 후 예약 정보를 시스템에 전달한다.
+
+    - reservation_type: "flight" 또는 "hotel"
+    - detail: 반드시 dict(객체)여야 한다. 문자열 불가.
+      항공권 예시: {"airline": "Korean Air", "origin": "ICN", "destination": "NRT",
+                   "departing_at": "2026-05-15T10:00:00", "offer_id": "off_xxx"}
+      숙소 예시:  {"name": "Shinjuku Grand Hotel", "address": "Shinjuku, Tokyo",
+                   "check_in": "2026-05-15", "check_out": "2026-05-18", "hotel_id": "prop_xxx"}
+    - total_price: 숫자형. 예) 450000
+    - currency: 통화 코드. 예) "KRW", "USD"
+    """
     return {"status": "success", "message": "예약 정보가 저장되었습니다."}
 
 
 @orchestrator_agent.tool_plain
 async def submit_cancel(reservation_id: str, cancelled_at: str) -> dict:
-    """cancel 타입 전용. 취소 완료 후 취소 정보를 시스템에 전달한다."""
+    """cancel 타입 전용. 취소 완료 후 취소 정보를 시스템에 전달한다.
+
+    - reservation_id: 취소된 예약 ID. 예) "RES-20260515-001"
+    - cancelled_at: 취소 시각. ISO 8601 형식. 예) "2026-05-05T10:00:00Z"
+    """
     return {"status": "success", "message": "취소 정보가 저장되었습니다."}
+
+
+# ---------------------------------------------------------------------------
+# 예약/취소 실행 도구 (Duffel API 미구현 — placeholder)
+# ---------------------------------------------------------------------------
+
+@orchestrator_agent.tool_plain
+async def book_flight(
+    offer_id: str,
+    passengers: list[dict],
+) -> dict:
+    """항공권 예약 실행. search_flights 결과의 offer_id로 예약 확정.
+
+    - offer_id: search_flights 결과에서 선택한 항공편 ID
+    - passengers: 탑승객 정보 목록. 예) [{"type": "adult", "name": "홍길동"}]
+    - 반환: {status: "todo"} — Duffel booking API 연결 후 실제 예약 처리 예정
+    """
+    return {"status": "todo", "message": "항공권 예약 API는 현재 개발 중입니다."}
+
+
+@orchestrator_agent.tool_plain
+async def book_hotel(
+    property_id: str,
+    check_in: str,
+    check_out: str,
+    guests: list[dict],
+) -> dict:
+    """숙소 예약 실행. search_hotels 결과의 property_id로 예약 확정.
+
+    - property_id: search_hotels 결과에서 선택한 숙소 ID
+    - check_in/check_out: YYYY-MM-DD 형식
+    - guests: 투숙객 정보 목록. 예) [{"type": "adult", "name": "홍길동"}]
+    - 반환: {status: "todo"} — Duffel accommodation booking API 연결 후 실제 예약 처리 예정
+    """
+    return {"status": "todo", "message": "숙소 예약 API는 현재 개발 중입니다."}
+
+
+@orchestrator_agent.tool_plain
+async def cancel_flight(order_id: str) -> dict:
+    """항공권 예약 취소. Duffel Air order_id로 항공권 취소 요청.
+
+    - order_id: 취소할 항공권 예약의 Duffel order ID (book_flight 또는 예약 완료 시 반환된 ID)
+    - 반환: {status: "todo"} — FlightAdapter.cancel_booking 연결 후 실제 취소 처리 예정
+    """
+    return {"status": "todo", "message": "항공권 취소 API는 현재 개발 중입니다."}
+
+
+@orchestrator_agent.tool_plain
+async def cancel_hotel(booking_id: str) -> dict:
+    """숙소 예약 취소. Duffel Stays booking_id로 숙소 취소 요청.
+
+    - booking_id: 취소할 숙소 예약의 Duffel booking ID (book_hotel 또는 예약 완료 시 반환된 ID)
+    - 반환: {status: "todo"} — AccommodationAdapter.cancel_booking 연결 후 실제 취소 처리 예정
+    """
+    return {"status": "todo", "message": "숙소 취소 API는 현재 개발 중입니다."}
 
 
 @orchestrator_agent.tool_plain
