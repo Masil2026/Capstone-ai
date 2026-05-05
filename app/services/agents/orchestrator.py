@@ -42,19 +42,31 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
     "itinerary": """\
 ## 이번 요청: 일정 생성/수정 (itinerary)
 
-처리 순서:
-1. current_itinerary가 있으면 기존 일정을 수정 기준으로 참고한다. 없으면 전체 일정을 새로 생성한다.
-2. 필요한 정보를 수집한다.
-   - search_web: 여행지 관광 정보·현지 팁·트렌드
-   - get_weather / get_historical_weather: 여행 기간 날씨 (16일 초과면 작년 같은 시기 참고)
-   - search_place: 식당·관광지 장소 정보
-   - find_route: 장소 간 이동 경로·소요 시간
-   - search_flights: 항공편 검색 (이동 구간이 포함된 일정일 때)
-   - search_hotels: 숙소 검색 (숙박 정보가 필요할 때)
-3. 일정이 완성되면 반드시 submit_itinerary(day_plans)를 호출한다.
-   - day_plans 키 형식: "1일차", "2일차", ...
-   - 각 항목 필드: plan_name, time("HH:MM ~ HH:MM"), place, note
-4. 텍스트 응답으로 일정 요약과 주요 추천 이유를 설명한다.""",
+### current_itinerary가 None인 경우 — 신규 일정 생성
+1. 아래 도구를 모두 호출하여 정보를 수집한다.
+   - search_web: 여행지 관광 명소·현지 팁·트렌드
+   - get_weather (16일 이내) 또는 get_historical_weather (16일 초과)
+   - search_place: 주요 장소 위치·평점
+   - find_route: 장소 간 이동 수단·소요 시간
+   - search_flights: 출발지→목적지 항공편
+   - search_hotels: 여행 기간 숙소
+2. 수집한 정보를 바탕으로 전체 일정을 생성하고 submit_itinerary(day_plans)를 호출한다.
+
+### current_itinerary가 있는 경우 — 기존 일정 수정
+1. 사용자가 변경 요청한 부분만 수정한다.
+2. 아래 도구를 필요한 경우에만 선택적으로 호출한다.
+   - search_web: 변경 장소의 여행 정보가 필요할 때
+   - get_weather / get_historical_weather: 날씨 재확인이 필요할 때
+   - search_place: 새로 추가하는 장소 정보가 필요할 때
+   - find_route: 변경으로 인해 이동 경로가 달라질 때
+   - search_flights: 항공편 변경을 요청했을 때만
+   - search_hotels: 숙소 변경을 요청했을 때만
+3. 수정된 전체 일정으로 submit_itinerary(day_plans)를 호출한다.
+
+### 공통
+- day_plans 키 형식: "1일차", "2일차", ...
+- 각 항목 필드: plan_name, time("HH:MM ~ HH:MM"), place, note
+- 텍스트 응답으로 일정 요약과 주요 추천 이유를 설명한다.""",
 
     "change": """\
 ## 이번 요청: 여행 기본 정보 변경 (change)
@@ -161,6 +173,7 @@ async def search_flights(
 ) -> dict:
     """항공권 검색.
 
+    신규 일정 생성 시 반드시 호출. 기존 일정 수정 시에는 사용자가 항공편 변경을 요청할 때만 호출.
     - origin/destination: 영문 도시명(Seoul, Tokyo, Osaka) 또는 IATA 코드(ICN, NRT, KIX) 모두 허용
     - departure_date: YYYY-MM-DD 형식. 예) "2026-05-15"
     - children >= 1이면 child_ages에 각 아이 나이를 반드시 포함. 개수 불일치 시 에러.
@@ -189,6 +202,7 @@ async def search_hotels(
 ) -> dict:
     """숙소 검색.
 
+    신규 일정 생성 시 반드시 호출. 기존 일정 수정 시에는 사용자가 숙소 변경을 요청할 때만 호출.
     - city_name: 영문 또는 한글 도시명. 예) "Tokyo", "Osaka", "도쿄"
     - check_in/check_out: YYYY-MM-DD 형식. 예) check_in="2026-06-15", check_out="2026-06-18" (3박)
     - children >= 1이면 child_ages에 각 아이 나이를 반드시 포함. 개수 불일치 시 에러.
