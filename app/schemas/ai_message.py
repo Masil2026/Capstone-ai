@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 # ── 요청 ──────────────────────────────────────────────────────────────────────
@@ -30,10 +30,7 @@ class DayPlanItem(BaseModel):
 class ResponseClassification(BaseModel):
     type: Literal["chat", "itinerary", "change", "reservation", "cancel"]
 
-    # itinerary
-    dayPlans: dict[str, list[DayPlanItem]] | None = None
-
-    # change
+    # change — dayPlans는 submit_itinerary 도구로 별도 캡처됨
     startDate: str | None = None
     endDate: str | None = None
     budget: float | None = None

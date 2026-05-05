@@ -128,14 +128,30 @@ class OrchestratorDeps:
 `current_itinerary`는 일정 수정 시 기존 일정 맥락으로 주입됩니다. `None`이면 신규 생성으로 처리합니다.
 어댑터·도구 함수는 deps를 직접 참조하지 않습니다.
 
-### 3-2. 도구 호출 및 스트리밍
+### 3-2. 타입별 orchestrator 처리 방식
+
+type에 따라 orchestrator가 호출하는 도구와 처리 방식이 다릅니다.
+
+| type | 외부 API 도구 | orchestrator 동작 | Spring Boot 후처리 |
+|------|-------------|-----------------|------------------|
+| `itinerary` | search_place, search_web, get_weather 등 | 일정 생성·수정 → `submit_itinerary` 호출로 dayPlans 전달 | dayPlans로 DB 일정 교체 |
+| `change` | **없음** | 변경 내용을 텍스트로 확인 응답만. 도구 호출 불필요 | classification 추출값으로 DB 직접 업데이트 |
+| `reservation` | search_flights / search_hotels + 예약 API | 예약 완료 후 예약 정보 포함 응답 | reservations 테이블 저장 |
+| `cancel` | 취소 API | 취소 완료 후 응답 | reservations.status = "cancelled" |
+| `chat` | search_web, get_weather 등 (필요 시) | 정보 제공 텍스트 응답 | 추가 처리 없음 |
+
+> `change`는 외부 API 없이 orchestrator가 사용자 요청을 확인하는 텍스트만 반환합니다.
+> classification_agent가 응답에서 변경된 값(startDate, endDate, budget 등)을 추출하면
+> Spring Boot가 자체 일정 수정 API에 해당 값을 담아 DB를 업데이트합니다.
+
+### 3-3. 도구 호출 및 스트리밍
 
 ```
 orchestrator_agent.run_stream(user_input, deps=OrchestratorDeps(...), message_history=history)
   ↓
-필요시 도구 호출 (search_flights, search_web 등)
+type에 따라 필요한 도구 호출 (change는 도구 호출 없음)
   ↓
-일정 생성/수정 완료 시 → submit_itinerary(day_plans={...}) 호출
+itinerary 타입이면 → submit_itinerary(day_plans={...}) 호출
   (텍스트 스트리밍과 병행. dayPlans 구조체를 엔드포인트로 전달)
   ↓
 텍스트 토큰 생성 → SSE event: chunk 실시간 전송
