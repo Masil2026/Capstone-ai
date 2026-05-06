@@ -1,6 +1,6 @@
 # import pytest
 # from pydantic_ai import Agent
-# from app.services.agent import _build_model
+# from app.services.agents._base import _build_model
 
 
 # @pytest.mark.asyncio
