@@ -7,15 +7,9 @@ from pydantic import BaseModel
 
 # ── 요청 ──────────────────────────────────────────────────────────────────────
 
-class MemoryInput(BaseModel):
-    aiSummary: str | None = None
-    preferences: dict[str, Any] | None = None
-
-
 class AiMessageRequest(BaseModel):
     roomId: str
     content: str
-    memory: MemoryInput | None = None
 
 
 # ── classification_agent 출력 (내부 구조체) ───────────────────────────────────

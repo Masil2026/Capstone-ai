@@ -10,41 +10,10 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.schemas.ai_message import MemoryInput
 from .memory import load_history, load_memory, save_memory
 
 _openai_client = AsyncOpenAI(api_key=settings.GPT_API_KEY)
 _EMBEDDING_MODEL = "text-embedding-3-small"
-
-
-# ---------------------------------------------------------------------------
-# 메모리 동기화
-# ---------------------------------------------------------------------------
-
-async def sync_memory(room_id: str, request_memory: MemoryInput | None) -> None:
-    """요청 body.memory와 Redis memory 비교 후 필요시 Redis 업데이트.
-
-    규칙:
-      request_memory 있음 + Redis 없음       → Redis에 저장
-      request_memory 있음 + Redis 있음 + 다름 → 요청 기준으로 교체
-      request_memory 있음 + Redis 있음 + 같음 → 유지
-      request_memory None  + Redis 있음       → Redis 유지
-      request_memory None  + Redis 없음       → 아무것도 안 함
-    """
-    if request_memory is None:
-        return
-
-    redis_memory = await load_memory(room_id)
-
-    req_summary = request_memory.aiSummary
-    req_prefs = request_memory.preferences
-
-    if redis_memory is None:
-        await save_memory(room_id, req_summary, req_prefs)
-        return
-
-    if redis_memory.get("ai_summary") != req_summary or redis_memory.get("preferences") != req_prefs:
-        await save_memory(room_id, req_summary, req_prefs)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +47,21 @@ def _query_similar_messages(room_id: str, embedding: list[float]) -> list[dict]:
             {"room_id": room_id, "emb": str(embedding)},
         ).fetchall()
     return [{"role": r.role, "content": r.content} for r in rows]
+
+
+def _query_chat_room_memory(room_id: str) -> dict:
+    """chat_rooms 테이블에서 ai_summary, preferences 조회"""
+    with SessionLocal() as db:
+        row = db.execute(
+            text("SELECT ai_summary, preferences FROM chat_rooms WHERE id = :room_id"),
+            {"room_id": room_id},
+        ).fetchone()
+    if row is None:
+        return {"ai_summary": None, "preferences": None}
+    preferences = row.preferences
+    if isinstance(preferences, str):
+        preferences = json.loads(preferences)
+    return {"ai_summary": row.ai_summary, "preferences": preferences}
 
 
 def _query_current_itinerary(room_id: str) -> dict | None:
@@ -128,41 +112,47 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     반환 키:
         user_embedding    : 사용자 메시지 임베딩 (done 이벤트 + pgvector용)
         history           : 최근 20개 대화 히스토리 (pydantic-ai ModelMessage)
-        ai_summary        : Redis memory.ai_summary
-        preferences       : Redis memory.preferences
+        ai_summary        : chat_rooms.ai_summary (DB)
+        preferences       : chat_rooms.preferences (DB)
         similar_messages  : pgvector 유사 메시지 최대 5개 [{"role", "content"}]
         current_itinerary : 현재 여행 일정 전체 (없으면 None)
     """
     loop = asyncio.get_running_loop()
 
-    # 임베딩·히스토리·메모리는 독립적이므로 병렬 로드
-    user_embedding, history, memory = await asyncio.gather(
+    # 임베딩·히스토리·Redis memory는 독립적이므로 병렬 로드
+    user_embedding, history, redis_memory = await asyncio.gather(
         get_user_embedding(user_message),
         load_history(room_id),
         load_memory(room_id),
     )
 
-    # pgvector 검색은 임베딩이 있어야 해서 순차 실행
-    try:
-        similar_messages = await loop.run_in_executor(
-            None, _query_similar_messages, room_id, user_embedding
-        )
-    except Exception:
-        similar_messages = []  # 폴백: 빈 리스트로 스트리밍 계속 진행
+    # Redis miss → DB에서 로드 후 Redis에 저장
+    if redis_memory is None:
+        try:
+            redis_memory = await loop.run_in_executor(None, _query_chat_room_memory, room_id)
+        except Exception:
+            redis_memory = {"ai_summary": None, "preferences": None}
+        await save_memory(room_id, redis_memory["ai_summary"], redis_memory["preferences"])
 
-    # 현재 일정 조회
+    # pgvector 검색과 itinerary 조회는 임베딩 이후 병렬 실행
+    similar_fut = loop.run_in_executor(None, _query_similar_messages, room_id, user_embedding)
+    itinerary_fut = loop.run_in_executor(None, _query_current_itinerary, room_id)
+
     try:
-        current_itinerary = await loop.run_in_executor(
-            None, _query_current_itinerary, room_id
-        )
+        similar_messages = await similar_fut
+    except Exception:
+        similar_messages = []
+
+    try:
+        current_itinerary = await itinerary_fut
     except Exception:
         current_itinerary = None
 
     return {
         "user_embedding": user_embedding,
         "history": history,
-        "ai_summary": memory.get("ai_summary") if memory else None,
-        "preferences": memory.get("preferences") if memory else None,
+        "ai_summary": redis_memory["ai_summary"],
+        "preferences": redis_memory["preferences"],
         "similar_messages": similar_messages,
         "current_itinerary": current_itinerary,
     }
