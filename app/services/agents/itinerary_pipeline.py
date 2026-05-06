@@ -460,11 +460,10 @@ async def run_itinerary_pipeline(
     deps,           # OrchestratorDeps
     user_message: str,
     history: list,
-) -> tuple[OrchestratorResult, list] | None:
+) -> OrchestratorResult | None:
     """
     current_itinerary(destination, dates, adults 등)가 없으면 None 반환.
     None이면 호출자가 orchestrator로 폴백.
-    성공 시 (OrchestratorResult, messages) 반환 — messages는 save_history용 planner 메시지.
     """
     itinerary = deps.current_itinerary
     if not itinerary or not itinerary.get("destination") or not itinerary.get("start_date"):
@@ -524,5 +523,4 @@ async def run_itinerary_pipeline(
         f"{destination} {itinerary.get('total_days', '')}일 여행 일정을 완성해줘.",
         deps=synth_deps,
     )
-    # planner 메시지(user prompt 포함)를 히스토리로 반환
-    return synth_result.data, planner_result.all_messages()
+    return synth_result.data

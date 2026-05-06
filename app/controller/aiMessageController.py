@@ -22,7 +22,7 @@ from app.services.adapters.currency_converter import to_krw
 from app.services.agents.classification import classification_agent
 from app.services.agents.context import get_user_embedding, load_context
 from app.services.agents.itinerary_pipeline import run_itinerary_pipeline
-from app.services.agents.memory import save_history, save_memory
+from app.services.agents.memory import save_memory
 from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agent
 
 router = APIRouter()
@@ -111,22 +111,18 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     # [4] 에이전트 실행 — itinerary는 파이프라인, 그 외는 오케스트레이터
     try:
         if request_type == "itinerary":
-            pipeline_result = await run_itinerary_pipeline(deps, user_message, ctx["history"])
-            if pipeline_result is None:
+            orch_result = await run_itinerary_pipeline(deps, user_message, ctx["history"])
+            if orch_result is None:
                 # current_itinerary 없음 → 오케스트레이터 폴백
                 run_result = await orchestrator_agent.run(
                     user_message, deps=deps, message_history=ctx["history"],
                 )
                 orch_result = run_result.data
-                all_messages = run_result.all_messages()
-            else:
-                orch_result, all_messages = pipeline_result
         else:
             run_result = await orchestrator_agent.run(
                 user_message, deps=deps, message_history=ctx["history"],
             )
             orch_result = run_result.data
-            all_messages = run_result.all_messages()
 
         full_response: str = orch_result.message
 
@@ -157,10 +153,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     if orch_result.ai_summary or orch_result.preferences:
         await save_memory(room_id, orch_result.ai_summary, orch_result.preferences)
 
-    # [9] chat_history 저장 (최근 20개 유지, 도구 메시지 자동 필터링)
-    await save_history(room_id, all_messages)
-
-    # [10] done 이벤트 전송
+    # [9] done 이벤트 전송
     done = _build_done_event(
         request_type=request_type,
         user_message=user_message,

@@ -5,12 +5,15 @@ import asyncio
 import json
 from typing import Any
 
+import json as _json
+
 from openai import AsyncOpenAI
+from pydantic_ai.messages import ModelMessagesTypeAdapter
 from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from .memory import load_history, load_memory, save_memory
+from .memory import load_memory, save_memory, save_history
 
 _openai_client = AsyncOpenAI(api_key=settings.GPT_API_KEY)
 _EMBEDDING_MODEL = "text-embedding-3-small"
@@ -32,6 +35,41 @@ async def get_user_embedding(text_input: str) -> list[float]:
 # ---------------------------------------------------------------------------
 # DB 조회 (동기 — run_in_executor에서 실행)
 # ---------------------------------------------------------------------------
+
+def _query_recent_history(room_id: str) -> list:
+    """chat_messages에서 최근 20개 조회 → pydantic-ai ModelMessage 리스트로 변환"""
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                "SELECT role, content, created_at FROM chat_messages "
+                "WHERE room_id = :room_id "
+                "ORDER BY created_at DESC LIMIT 20"
+            ),
+            {"room_id": room_id},
+        ).fetchall()
+
+    raw = []
+    for row in reversed(rows):  # 오래된 순으로
+        ts = row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at)
+        if row.role == "user":
+            raw.append({
+                "kind": "request",
+                "parts": [{"part_kind": "user-prompt", "content": row.content, "timestamp": ts}],
+            })
+        elif row.role == "assistant":
+            raw.append({
+                "kind": "response",
+                "parts": [{"part_kind": "text", "content": row.content}],
+                "model_name": "db",
+                "timestamp": ts,
+            })
+    if not raw:
+        return []
+    try:
+        return ModelMessagesTypeAdapter.validate_json(_json.dumps(raw))
+    except Exception:
+        return []
+
 
 def _query_similar_messages(room_id: str, embedding: list[float]) -> list[dict]:
     """pgvector 코사인 유사도 기준 상위 5개 과거 메시지 조회"""
@@ -119,10 +157,9 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     """
     loop = asyncio.get_running_loop()
 
-    # 임베딩·히스토리·Redis memory는 독립적이므로 병렬 로드
-    user_embedding, history, redis_memory = await asyncio.gather(
+    # 임베딩·Redis memory는 독립적이므로 병렬 로드
+    user_embedding, redis_memory = await asyncio.gather(
         get_user_embedding(user_message),
-        load_history(room_id),
         load_memory(room_id),
     )
 
@@ -134,9 +171,10 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
             redis_memory = {"ai_summary": None, "preferences": None}
         await save_memory(room_id, redis_memory["ai_summary"], redis_memory["preferences"])
 
-    # pgvector 검색과 itinerary 조회는 임베딩 이후 병렬 실행
+    # pgvector 검색 · itinerary 조회 · 대화 히스토리는 임베딩 이후 병렬 실행
     similar_fut = loop.run_in_executor(None, _query_similar_messages, room_id, user_embedding)
     itinerary_fut = loop.run_in_executor(None, _query_current_itinerary, room_id)
+    history_fut = loop.run_in_executor(None, _query_recent_history, room_id)
 
     try:
         similar_messages = await similar_fut
@@ -147,6 +185,15 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
         current_itinerary = await itinerary_fut
     except Exception:
         current_itinerary = None
+
+    try:
+        history = await history_fut
+    except Exception:
+        history = []
+
+    # DB에서 읽은 히스토리를 Redis에 mirror (비동기 fire-and-forget)
+    if history:
+        asyncio.ensure_future(save_history(room_id, history))
 
     return {
         "user_embedding": user_embedding,
