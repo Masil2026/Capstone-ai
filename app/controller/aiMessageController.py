@@ -27,13 +27,30 @@ from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agen
 
 router = APIRouter()
 
+
+def _sse(event: str, payload: dict) -> str:
+    """SSE 이벤트를 pretty-printed JSON으로 직렬화. 각 JSON 줄에 'data: ' 접두사."""
+    lines = json.dumps(payload, ensure_ascii=False, indent=2).split("\n")
+    data_block = "\n".join(f"data: {line}" for line in lines)
+    return f"event: {event}\n{data_block}\n\n"
+
+
 _SSE_EXAMPLE = (
-    'event: chunk\ndata: {"content": "5월 도쿄는 맑고"}\n\n'
-    'event: chunk\ndata: {"content": " 따뜻한 날씨입니다!"}\n\n'
-    'event: done\ndata: {"type": "chat",'
-    '"userMessage": {"content": "도쿄 날씨 어때?", "embedding": [0.023, -0.12, "...(1536차원)"]},'
-    '"assistantMessage": {"content": "5월 도쿄는 맑고 따뜻한 날씨입니다!", "embedding": [0.087, 0.002, "...(1536차원)"]},'
-    '"memory": null}\n\n'
+    "event: chunk\n"
+    'data: {"content": "5월 도쿄는 맑고 따뜻한 날씨입니다!"}\n\n'
+    "event: done\n"
+    "data: {\n"
+    'data:   "type": "chat",\n'
+    'data:   "userMessage": {\n'
+    'data:     "content": "도쿄 날씨 어때?",\n'
+    'data:     "embedding": [0.023, -0.12, "...(1536차원)"]\n'
+    "data:   },\n"
+    'data:   "assistantMessage": {\n'
+    'data:     "content": "5월 도쿄는 맑고 따뜻한 날씨입니다!",\n'
+    'data:     "embedding": [0.087, 0.002, "...(1536차원)"]\n'
+    "data:   },\n"
+    'data:   "memory": null\n'
+    "data: }\n\n"
 )
 
 
@@ -71,7 +88,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     try:
         ctx = await load_context(room_id, user_message)
     except Exception as e:
-        yield f"event: error\ndata: {json.dumps({'message': f'컨텍스트 로드 실패: {e}'}, ensure_ascii=False)}\n\n"
+        yield _sse("error", {"message": f"컨텍스트 로드 실패: {e}"})
         return
 
     # [2] 타입 판별
@@ -114,11 +131,11 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         full_response: str = orch_result.message
 
     except Exception as e:
-        yield f"event: error\ndata: {json.dumps({'message': f'에이전트 오류: {e}'}, ensure_ascii=False)}\n\n"
+        yield _sse("error", {"message": f"에이전트 오류: {e}"})
         return
 
     # [5] 텍스트를 chunk 이벤트로 전송 (구조화 출력이므로 한 번에 전송)
-    yield f"event: chunk\ndata: {json.dumps({'content': full_response}, ensure_ascii=False)}\n\n"
+    yield _sse("chunk", {"content": full_response})
 
     # [6] day_plans cost.amount_krw 자동 변환
     if orch_result.day_plans:
@@ -155,7 +172,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     if hide_embedding:
         done.userMessage.embedding = None
         done.assistantMessage.embedding = None
-    yield f"event: done\ndata: {done.model_dump_json(exclude_none=True)}\n\n"
+    yield _sse("done", done.model_dump(exclude_none=True))
 
 
 def _build_done_event(
