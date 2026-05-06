@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic_ai import Agent, RunContext
 
@@ -27,6 +27,7 @@ class OrchestratorDeps:
     similar_messages: list[dict]    # pgvector 유사 과거 메시지 최대 5개
     current_itinerary: dict | None  # 현재 여행 일정 dayPlans (DB read-only, roomId 기준)
     request_type: str               # classification_agent 판별 결과
+    captured: dict = field(default_factory=dict)  # submit_*/update_memory 도구 호출 결과 캡처
 
 # ---------------------------------------------------------------------------
 # 오케스트레이터 에이전트
@@ -317,14 +318,16 @@ async def search_place(query: str) -> dict:
     })
 
 
-@orchestrator_agent.tool_plain
-async def submit_itinerary(day_plans: dict[str, list[DayPlanItem]]) -> dict:
+@orchestrator_agent.tool
+async def submit_itinerary(ctx: RunContext[OrchestratorDeps], day_plans: dict[str, list[DayPlanItem]]) -> dict:
     """itinerary 타입 전용. 일정 생성/수정 완료 시 반드시 호출. 구조화된 dayPlans를 시스템에 전달한다."""
+    ctx.deps.captured["itinerary"] = day_plans
     return {"status": "success", "message": "일정이 저장되었습니다."}
 
 
-@orchestrator_agent.tool_plain
+@orchestrator_agent.tool
 async def submit_change(
+    ctx: RunContext[OrchestratorDeps],
     start_date: str | None = None,
     end_date: str | None = None,
     budget: float | None = None,
@@ -333,11 +336,20 @@ async def submit_change(
     child_ages: list[int] | None = None,
 ) -> dict:
     """change 타입 전용. 변경된 여행 기본 정보를 시스템에 전달한다. 변경된 필드만 포함."""
+    ctx.deps.captured["change"] = {k: v for k, v in {
+        "start_date": start_date,
+        "end_date": end_date,
+        "budget": budget,
+        "adult_count": adult_count,
+        "child_count": child_count,
+        "child_ages": child_ages,
+    }.items() if v is not None}
     return {"status": "success", "message": "변경 정보가 저장되었습니다."}
 
 
-@orchestrator_agent.tool_plain
+@orchestrator_agent.tool
 async def submit_reservation(
+    ctx: RunContext[OrchestratorDeps],
     reservation_type: str,
     detail: dict,
     booking_url: str | None = None,
@@ -357,16 +369,33 @@ async def submit_reservation(
     - total_price: 숫자형. 예) 450000
     - currency: 통화 코드. 예) "KRW", "USD"
     """
+    ctx.deps.captured["reservation"] = {
+        "reservation_type": reservation_type,
+        "detail": detail,
+        "booking_url": booking_url,
+        "external_ref_id": external_ref_id,
+        "total_price": total_price,
+        "currency": currency,
+        "reserved_at": reserved_at,
+    }
     return {"status": "success", "message": "예약 정보가 저장되었습니다."}
 
 
-@orchestrator_agent.tool_plain
-async def submit_cancel(reservation_id: str, cancelled_at: str) -> dict:
+@orchestrator_agent.tool
+async def submit_cancel(
+    ctx: RunContext[OrchestratorDeps],
+    reservation_id: str,
+    cancelled_at: str,
+) -> dict:
     """cancel 타입 전용. 취소 완료 후 취소 정보를 시스템에 전달한다.
 
     - reservation_id: 취소된 예약 ID. 예) "RES-20260515-001"
     - cancelled_at: 취소 시각. ISO 8601 형식. 예) "2026-05-05T10:00:00Z"
     """
+    ctx.deps.captured["cancel"] = {
+        "reservation_id": reservation_id,
+        "cancelled_at": cancelled_at,
+    }
     return {"status": "success", "message": "취소 정보가 저장되었습니다."}
 
 
@@ -439,10 +468,15 @@ async def cancel_hotel(booking_id: str) -> dict:
     return {"status": "todo", "message": "숙소 취소 API는 현재 개발 중입니다."}
 
 
-@orchestrator_agent.tool_plain
+@orchestrator_agent.tool
 async def update_memory(
+    ctx: RunContext[OrchestratorDeps],
     ai_summary: str | None = None,
     preferences: dict | None = None,
 ) -> dict:
     """모든 타입 공통. 대화 중 기억할 정보(취향·요약)가 감지될 때 호출한다."""
+    ctx.deps.captured["memory"] = {
+        "ai_summary": ai_summary,
+        "preferences": preferences,
+    }
     return {"status": "success", "message": "메모리가 갱신되었습니다."}
