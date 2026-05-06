@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 from app.controller.TestController import router as test_router
 from app.controller.aiMessageController import router as ai_message_router
 
@@ -9,6 +10,30 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})["InternalToken"] = {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token",
+    }
+    for path in schema.get("paths", {}).values():
+        for operation in path.values():
+            operation.setdefault("security", [{"InternalToken": []}])
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi
 
 app.include_router(test_router, prefix="/api/test", tags=["Test"])
 app.include_router(ai_message_router, prefix="/api/v1", tags=["AI Messages"])

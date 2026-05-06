@@ -29,8 +29,44 @@ class DayPlanItem(BaseModel):
 
 
 class ResponseClassification(BaseModel):
-    # 구조화 데이터는 orchestrator의 submit_* 도구가 담당. 여기서는 type만 반환
     type: Literal["chat", "itinerary", "change", "reservation", "cancel"]
+
+
+# ── 오케스트레이터 result_type DTO ────────────────────────────────────────────
+
+class ChangeFields(BaseModel):
+    start_date: str | None = None   # YYYY-MM-DD
+    end_date: str | None = None
+    budget: float | None = None
+    adult_count: int | None = None
+    child_count: int | None = None
+    child_ages: list[int] | None = None
+
+
+class CancelFields(BaseModel):
+    reservation_id: str
+    cancelled_at: str               # ISO 8601
+
+
+class ReservationFields(BaseModel):
+    reservation_type: str           # "flight" | "hotel"
+    detail: dict[str, Any]
+    booking_url: str | None = None
+    external_ref_id: str | None = None
+    total_price: float | None = None
+    currency: str | None = None
+    reserved_at: str | None = None
+
+
+class OrchestratorResult(BaseModel):
+    """오케스트레이터 구조화 출력. message가 첫 번째 필드여야 스트리밍이 가능하다."""
+    message: str                                        # 항상 필수 — 자연어 응답
+    ai_summary: str | None = None                      # itinerary·change 후 항상 작성
+    preferences: dict[str, Any] | None = None          # 취향 업데이트 시만
+    day_plans: dict[str, list[DayPlanItem]] | None = None   # itinerary 타입
+    change: ChangeFields | None = None                 # change 타입
+    reservation: ReservationFields | None = None       # reservation 타입
+    cancel: CancelFields | None = None                 # cancel 타입
 
 
 # ── done 이벤트 페이로드 ──────────────────────────────────────────────────────
