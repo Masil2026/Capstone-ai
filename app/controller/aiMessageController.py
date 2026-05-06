@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import date
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
 from app.core.auth import verify_internal_token
@@ -16,22 +16,45 @@ from app.schemas.ai_message import (
     ItineraryPayload,
     MessageWithEmbedding,
     MemoryOutput,
+    OrchestratorResult,
 )
+from app.services.adapters.currency_converter import to_krw
 from app.services.agents.classification import classification_agent
 from app.services.agents.context import get_user_embedding, load_context
+from app.services.agents.itinerary_pipeline import run_itinerary_pipeline
 from app.services.agents.memory import save_history, save_memory
 from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agent
 
 router = APIRouter()
 
+_SSE_EXAMPLE = (
+    'event: chunk\ndata: {"content": "5월 도쿄는 맑고"}\n\n'
+    'event: chunk\ndata: {"content": " 따뜻한 날씨입니다!"}\n\n'
+    'event: done\ndata: {"type": "chat",'
+    '"userMessage": {"content": "도쿄 날씨 어때?", "embedding": [0.023, -0.12, "...(1536차원)"]},'
+    '"assistantMessage": {"content": "5월 도쿄는 맑고 따뜻한 날씨입니다!", "embedding": [0.087, 0.002, "...(1536차원)"]},'
+    '"memory": null}\n\n'
+)
 
-@router.post("/ai-messages")
+
+@router.post(
+    "/ai-messages",
+    summary="AI Agent 스트리밍 요청",
+    responses={
+        200: {
+            "description": "SSE 스트림. chunk(0~N회) → done(1회) 순서로 전송. 오류 시 error 이벤트.",
+            "content": {"text/event-stream": {"example": _SSE_EXAMPLE}},
+        },
+        403: {"description": "유효하지 않은 X-Internal-Token"},
+    },
+)
 async def ai_messages(
     body: AiMessageRequest,
     _: None = Depends(verify_internal_token),
+    hide_embedding: bool = Query(False, description="개발용: true이면 done 이벤트의 embedding 생략"),
 ):
     return StreamingResponse(
-        _stream(body),
+        _stream(body, hide_embedding=hide_embedding),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -40,7 +63,7 @@ async def ai_messages(
     )
 
 
-async def _stream(body: AiMessageRequest):
+async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     room_id = body.roomId
     user_message = body.content
 
@@ -68,49 +91,70 @@ async def _stream(body: AiMessageRequest):
         request_type=request_type,
     )
 
-    # [4] 스트리밍 → chunk SSE 전송
+    # [4] 에이전트 실행 — itinerary는 파이프라인, 그 외는 오케스트레이터
     try:
-        async with orchestrator_agent.run_stream(
-            user_message,
-            deps=deps,
-            message_history=ctx["history"],
-        ) as result:
-            async for chunk in result.stream_text(delta=True):
-                yield f"event: chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+        if request_type == "itinerary":
+            pipeline_result = await run_itinerary_pipeline(deps, user_message, ctx["history"])
+            if pipeline_result is None:
+                # current_itinerary 없음 → 오케스트레이터 폴백
+                run_result = await orchestrator_agent.run(
+                    user_message, deps=deps, message_history=ctx["history"],
+                )
+                orch_result = run_result.data
+                all_messages = run_result.all_messages()
+            else:
+                orch_result, all_messages = pipeline_result
+        else:
+            run_result = await orchestrator_agent.run(
+                user_message, deps=deps, message_history=ctx["history"],
+            )
+            orch_result = run_result.data
+            all_messages = run_result.all_messages()
 
-            full_response: str = result.data
-            all_messages = result.all_messages()
+        full_response: str = orch_result.message
 
     except Exception as e:
         yield f"event: error\ndata: {json.dumps({'message': f'에이전트 오류: {e}'}, ensure_ascii=False)}\n\n"
         return
 
-    # [5] AI 응답 임베딩 생성
+    # [5] 텍스트를 chunk 이벤트로 전송 (구조화 출력이므로 한 번에 전송)
+    yield f"event: chunk\ndata: {json.dumps({'content': full_response}, ensure_ascii=False)}\n\n"
+
+    # [6] day_plans cost.amount_krw 자동 변환
+    if orch_result.day_plans:
+        for items in orch_result.day_plans.values():
+            for item in items:
+                if item.cost and item.cost.currency != "KRW" and item.cost.amount_krw is None:
+                    try:
+                        item.cost.amount_krw = await to_krw(item.cost.amount, item.cost.currency)
+                    except Exception:
+                        pass
+
+    # [7] AI 응답 임베딩 생성
     try:
         assistant_embedding = await get_user_embedding(full_response)
     except Exception:
         assistant_embedding = None
 
-    # [6] update_memory 호출 결과 → Redis 갱신
-    if captured_mem := deps.captured.get("memory"):
-        await save_memory(
-            room_id,
-            captured_mem.get("ai_summary"),
-            captured_mem.get("preferences"),
-        )
+    # [8] Redis memory 갱신
+    if orch_result.ai_summary or orch_result.preferences:
+        await save_memory(room_id, orch_result.ai_summary, orch_result.preferences)
 
-    # [7] chat_history 저장
+    # [9] chat_history 저장 (최근 20개 유지, 도구 메시지 자동 필터링)
     await save_history(room_id, all_messages)
 
-    # [7] done 이벤트 전송
+    # [10] done 이벤트 전송
     done = _build_done_event(
         request_type=request_type,
         user_message=user_message,
         user_embedding=ctx["user_embedding"],
         full_response=full_response,
         assistant_embedding=assistant_embedding,
-        captured=deps.captured,
+        orch_result=orch_result,
     )
+    if hide_embedding:
+        done.userMessage.embedding = None
+        done.assistantMessage.embedding = None
     yield f"event: done\ndata: {done.model_dump_json(exclude_none=True)}\n\n"
 
 
@@ -120,47 +164,49 @@ def _build_done_event(
     user_embedding: list[float],
     full_response: str,
     assistant_embedding: list[float] | None,
-    captured: dict,
+    orch_result: OrchestratorResult,
 ) -> DoneEvent:
     memory_output = None
-    if captured_mem := captured.get("memory"):
+    if orch_result.ai_summary or orch_result.preferences:
         memory_output = MemoryOutput(
-            aiSummary=captured_mem.get("ai_summary"),
-            preferences=captured_mem.get("preferences"),
+            aiSummary=orch_result.ai_summary,
+            preferences=orch_result.preferences,
         )
 
     itinerary = None
-    if payload := captured.get("itinerary"):
-        itinerary = ItineraryPayload(dayPlans=payload)
+    if orch_result.day_plans:
+        itinerary = ItineraryPayload(dayPlans=orch_result.day_plans)
 
     change = None
-    if payload := captured.get("change"):
+    if orch_result.change:
+        c = orch_result.change
         change = ChangePayload(
-            startDate=payload.get("start_date"),
-            endDate=payload.get("end_date"),
-            budget=payload.get("budget"),
-            adultCount=payload.get("adult_count"),
-            childCount=payload.get("child_count"),
-            childAges=payload.get("child_ages"),
+            startDate=c.start_date,
+            endDate=c.end_date,
+            budget=c.budget,
+            adultCount=c.adult_count,
+            childCount=c.child_count,
+            childAges=c.child_ages,
         )
 
     cancel = None
-    if payload := captured.get("cancel"):
+    if orch_result.cancel:
         cancel = CancelPayload(
-            reservationId=payload["reservation_id"],
-            cancelledAt=payload["cancelled_at"],
+            reservationId=orch_result.cancel.reservation_id,
+            cancelledAt=orch_result.cancel.cancelled_at,
         )
 
     reservation = None
-    if payload := captured.get("reservation"):
+    if orch_result.reservation:
+        r = orch_result.reservation
         reservation = {k: v for k, v in {
-            "type": payload.get("reservation_type"),
-            "detail": payload.get("detail"),
-            "bookingUrl": payload.get("booking_url"),
-            "externalRefId": payload.get("external_ref_id"),
-            "totalPrice": payload.get("total_price"),
-            "currency": payload.get("currency"),
-            "reservedAt": payload.get("reserved_at"),
+            "type": r.reservation_type,
+            "detail": r.detail,
+            "bookingUrl": r.booking_url,
+            "externalRefId": r.external_ref_id,
+            "totalPrice": r.total_price,
+            "currency": r.currency,
+            "reservedAt": r.reserved_at,
         }.items() if v is not None}
 
     return DoneEvent(
