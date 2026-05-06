@@ -18,19 +18,44 @@ _redis = aioredis.Redis(
 
 MAX_HISTORY_MESSAGES = 20
 
+
+def _clean_messages(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """tool-call·tool-return 파트를 제거해 오케스트레이터 구조 변경 후에도 히스토리 재사용 가능."""
+    raw: list[dict] = json.loads(ModelMessagesTypeAdapter.dump_json(messages))
+    clean: list[dict] = []
+    for msg in raw:
+        kind = msg.get("kind")
+        if kind == "request":
+            parts = [p for p in msg.get("parts", []) if p.get("part_kind") == "user-prompt"]
+            if parts:
+                clean.append({**msg, "parts": parts})
+        elif kind == "response":
+            parts = [p for p in msg.get("parts", []) if p.get("part_kind") == "text"]
+            if parts:
+                clean.append({**msg, "parts": parts})
+    if not clean:
+        return []
+    return ModelMessagesTypeAdapter.validate_json(json.dumps(clean))
+
+
 # ---------------------------------------------------------------------------
-# 대화 히스토리 (chat_history:{room_id})
+# 대화 히스토리 (chat_history:{room_id}) — 최근 20개 유지
 # ---------------------------------------------------------------------------
 
 async def load_history(room_id: str) -> list[ModelMessage]:
     data = await _redis.get(f"chat_history:{room_id}")
     if not data:
         return []
-    return ModelMessagesTypeAdapter.validate_json(data)
+    try:
+        messages = ModelMessagesTypeAdapter.validate_json(data)
+        return _clean_messages(messages)
+    except Exception:
+        return []
 
 
 async def save_history(room_id: str, messages: list[ModelMessage]) -> None:
-    trimmed = messages[-MAX_HISTORY_MESSAGES:]
+    clean = _clean_messages(messages)
+    trimmed = clean[-MAX_HISTORY_MESSAGES:]
     await _redis.set(f"chat_history:{room_id}", ModelMessagesTypeAdapter.dump_json(trimmed))
 
 
