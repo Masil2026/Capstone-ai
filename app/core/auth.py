@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi import HTTPException, Request
 from jose import jwt, JWTError
 import httpx
@@ -15,6 +17,16 @@ async def _get_jwks() -> dict:
         response.raise_for_status()
         _jwks_cache = response.json()
     return _jwks_cache
+
+
+async def verify_internal_token(request: Request) -> None:
+    """
+    X-Internal-Token 헤더를 검증합니다. Spring Boot → FastAPI 내부 서버 간 인증에 사용.
+    FastAPI Depends()로 사용하세요.
+    """
+    token = request.headers.get("X-Internal-Token", "")
+    if not secrets.compare_digest(token, settings.INTERNAL_TOKEN):
+        raise HTTPException(status_code=403, detail="유효하지 않은 내부 서버 토큰입니다.")
 
 
 async def get_current_user(request: Request) -> dict:
