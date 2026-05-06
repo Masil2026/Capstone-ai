@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from app.controller.TestController import router as test_router
+from app.controller.aiMessageController import router as ai_message_router
 
 app = FastAPI(
     title="MJU Capstone AI AGENTI",
@@ -10,6 +11,7 @@ app = FastAPI(
 )
 
 app.include_router(test_router, prefix="/api/test", tags=["Test"])
+app.include_router(ai_message_router, prefix="/api/v1", tags=["AI Messages"])
 
 @app.get("/", tags=["Health Check"])
 async def root():
