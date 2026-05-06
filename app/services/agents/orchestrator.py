@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pydantic_ai import Agent, RunContext
 
 from app.schemas.ai_message import DayPlanItem
+from app.services.adapters.currency_converter import to_krw
 from app.services.adapters.flight_api import FlightAdapter
 from app.services.adapters.accommodation_api import AccommodationAdapter
 from app.services.adapters.tavily_search import TavilySearchAdapter
@@ -43,31 +44,143 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
     "itinerary": """\
 ## 이번 요청: 일정 생성/수정 (itinerary)
 
-### current_itinerary가 None인 경우 — 신규 일정 생성
-1. 아래 도구를 모두 호출하여 정보를 수집한다.
-   - search_web: 여행지 관광 명소·현지 팁·트렌드
-   - get_weather (16일 이내) 또는 get_historical_weather (16일 초과)
-   - search_place: 주요 장소 위치·평점
-   - find_route: 장소 간 이동 수단·소요 시간
-   - search_flights: 출발지→목적지 항공편
-   - search_hotels: 여행 기간 숙소
-2. 수집한 정보를 바탕으로 전체 일정을 생성하고 submit_itinerary(day_plans)를 호출한다.
+> **중요**: 도구 호출이 끝나면 즉시 submit_itinerary를 호출하고 텍스트로 마무리한다.
+> "이어서 작성", "다음 단계에서 안내" 같은 표현으로 응답을 분리하지 않는다.
 
-### current_itinerary가 있는 경우 — 기존 일정 수정
-1. 사용자가 변경 요청한 부분만 수정한다.
-2. 아래 도구를 필요한 경우에만 선택적으로 호출한다.
-   - search_web: 변경 장소의 여행 정보가 필요할 때
-   - get_weather / get_historical_weather: 날씨 재확인이 필요할 때
-   - search_place: 새로 추가하는 장소 정보가 필요할 때
-   - find_route: 변경으로 인해 이동 경로가 달라질 때
-   - search_flights: 항공편 변경을 요청했을 때만
-   - search_hotels: 숙소 변경을 요청했을 때만
-3. 수정된 전체 일정으로 submit_itinerary(day_plans)를 호출한다.
+---
 
-### 공통
-- day_plans 키 형식: "1일차", "2일차", ...
-- 각 항목 필드: plan_name, time("HH:MM ~ HH:MM"), place, note
-- 텍스트 응답으로 일정 요약과 주요 추천 이유를 설명한다.""",
+### [STEP 1] 정보 수집 — current_itinerary가 None이면 전부, 있으면 변경된 부분만
+
+#### 1-1. 웹 검색 (search_web)
+- 여행지 관광 명소·현지 팁·계절 트렌드·예산 가이드 검색
+- 지역이 여러 곳이면 각 지역별로 search_web 호출
+
+#### 1-2. 날씨 (get_weather / get_historical_weather)
+- 여행 출발일로부터 귀국일까지 **모든 날짜** 커버
+- 여행 중 **지역 이동이 있으면 각 지역 체류 날짜에 해당 지역 날씨를 별도 호출**
+  예) 1~2일차 도쿄 → get_weather("Tokyo", 2), 3~4일차 오사카 → get_weather("Osaka", 2)
+- 여행일이 오늘부터 16일 이내: get_weather / 16일 초과: get_historical_weather(작년 같은 시기)
+- 날씨 결과를 일정에 반영: 비/폭염 날은 실내 활동 우선 배치
+
+#### 1-3. 항공편 (search_flights) — 신규 생성 또는 항공편 변경 요청 시
+- **출발편**: origin=출발지, destination=목적지, departure_date=출발일
+- **귀국편**: origin=목적지, destination=출발지, departure_date=귀국일
+  → 반드시 두 번 호출한다. 귀국편 미검색은 오류다.
+- 검색된 항공편 중 최적(가격·소요시간 고려)을 1일차와 마지막 날 일정에 포함
+- note: 항공사·편명·출도착 시각. cost: {"amount": price_original, "currency": currency, "amount_krw": price_krw} 형식으로 기재
+
+#### 1-4. 숙소 (search_hotels) — 신규 생성 또는 숙소 변경 요청 시
+- **지역별로 분리 호출**: 같은 도시에 연속 체류하면 해당 기간만큼 호출
+  예) 도쿄 2박(check_in=1일차, check_out=3일차) + 오사카 2박(check_in=3일차, check_out=5일차)
+- current_itinerary의 budget이 있으면 가격대에 맞는 숙소 선택
+- 각 일차 일정에 체크인/체크아웃 항목 추가. note: 숙소명·주소. cost: {"amount": price_original, "currency": currency, "amount_krw": price_krw} 형식으로 기재
+
+#### 1-5. 장소 검색 (search_place)
+- 방문 예정인 주요 관광지·식당·카페를 개별 검색하여 위치·평점 확인
+- 검색 결과로 평점 낮은 장소는 대안으로 교체 검토
+
+#### 1-6. 동선 계산 (find_route) — 하루 일정 내 장소 간 이동 시간
+- 하루 일정에서 **연속으로 방문하는 장소 쌍마다 각각 호출**
+  예) A→B, B→C, C→D가 있으면 find_route를 3번 호출
+- mode는 기본 "transit"(대중교통). 거리가 짧으면 "walking" 고려
+- 이동 시간을 time 필드에 반영하여 현실적인 시간표 구성
+
+---
+
+### [STEP 2] 일정 구성 규칙 — 모든 날짜에 빠짐없이 작성
+
+#### 시간 배분
+- **하루 시작**: 09:00 / **하루 종료**: 22:00
+- **식사 3회 필수**:
+  - 아침식사: 08:00 ~ 09:00 (숙소 조식 또는 근처 카페)
+  - 점심식사: 12:00 ~ 13:30
+  - 저녁식사: 18:30 ~ 20:00
+- **간식**: 오전·오후 이동 중 또는 카페 방문 시 추가 가능
+- 야간 행사(야경·야시장·바 등)는 20:30 이후 배치 가능, 22:00 전 종료
+
+#### 예산 반영
+- current_itinerary의 budget(총 예산)이 있으면 숙소·항공·식사·입장료에 균형 배분
+- 모든 항목의 cost 필드 합산이 budget 이내가 되도록 조정 (인원 수 곱셈 주의)
+- 식사는 현지 물가 기준 적정 가격대 식당 선택. 예산 부족 시 저가 식당으로 대체
+
+#### 이동 항목 — 장소 간 이동은 반드시 별도 plan item으로 추가
+연속 방문 장소 사이에 이동 시간이 5분 이상이면 이동 항목을 독립적으로 삽입한다.
+find_route 결과(distance, duration, steps)를 그대로 반영한다.
+
+이동 항목 작성 형식:
+- plan_name: "{출발지} → {도착지} 이동 ({이동수단})"
+  예) "신주쿠역 → 아사쿠사역 이동 (지하철 오에도선)"
+      "센소지 → 우에노 공원 이동 (도보)"
+      "도쿄역 → 교토역 이동 (신칸센 노조미)"
+- time: find_route duration 기반. 예) "10:00 ~ 10:35" (35분 소요)
+- place: 이동 수단 또는 경유 노선. 예) "Tokyo Metro 오에도선", "JR 신칸센"
+- note: 탑승 방법·환승·주의사항. 예) "오에도선 타쿠타마 방향 탑승, 아사쿠사역 하차"
+- cost: 이동 요금을 {"amount": 숫자, "currency": "통화코드"} 형식으로 기재
+  예) 지하철: {"amount": 280, "currency": "JPY"}
+      신칸센: {"amount": 13320, "currency": "JPY"}
+  → 무료(도보)이면 cost: null
+
+#### 각 항목별 cost 필드 작성 기준
+cost 구조: {"amount": float, "currency": str, "amount_krw": int | null}
+- amount: 현지 통화 금액 (1인 기준)
+- currency: ISO 4217 코드. "JPY", "USD", "CNY", "KRW" 등
+- amount_krw 작성 규칙:
+  · currency == "KRW" (국내 여행): amount_krw = null (한화가 곧 amount이므로 불필요)
+  · currency != "KRW", API 결과 있음 (항공·숙소): price_krw 값을 그대로 기재
+  · currency != "KRW", API 결과 없음 (식사·교통·입장료): amount_krw 생략 → 시스템이 자동 변환
+무료 항목은 cost: null.
+
+너가 제출하는 형식 (amount_krw를 모르는 경우 생략):
+  항공·숙소 → {"amount": 350.0, "currency": "USD", "amount_krw": 483000}  ← API price_krw 직접 기재
+  식사·교통 → {"amount": 280, "currency": "JPY"}                           ← amount_krw 생략
+  국내      → {"amount": 15000, "currency": "KRW"}                         ← amount_krw null
+
+시스템이 저장하는 최종 형식 (submit_itinerary가 amount_krw 자동 변환):
+  항공·숙소 → {"amount": 350.0, "currency": "USD", "amount_krw": 483000}
+  식사·교통 → {"amount": 280, "currency": "JPY", "amount_krw": 2604}       ← 자동 채워짐
+  국내      → {"amount": 15000, "currency": "KRW", "amount_krw": null}
+
+| 항목 유형 | 네가 제출하는 cost |
+|-----------|-------------------|
+| 이동(대중교통, 해외) | {"amount": 280, "currency": "JPY"} |
+| 이동(도보) | null |
+| 이동(신칸센·장거리) | {"amount": 13320, "currency": "JPY"} |
+| 관광지 입장료(해외) | {"amount": 1500, "currency": "JPY"} |
+| 무료 관광지 | null |
+| 식사(아침, 해외) | {"amount": 800, "currency": "JPY"} |
+| 식사(점심, 해외) | {"amount": 1500, "currency": "JPY"} |
+| 식사(저녁, 해외) | {"amount": 3000, "currency": "JPY"} |
+| 숙소 체크인(API) | {"amount": 15000.0, "currency": "JPY", "amount_krw": price_krw} |
+| 항공편(API) | {"amount": price_original, "currency": currency, "amount_krw": price_krw} |
+| 국내 이동·식사 | {"amount": 15000, "currency": "KRW"} |
+- amount는 항상 숫자(소수점 허용). 문자열 불가
+
+#### plan_name·time·place·note 작성 기준
+- plan_name: 구체적 활동명. 예) "센소지 참배 및 나카미세 거리 쇼핑"
+- time: "HH:MM ~ HH:MM" 형식. 이동 항목 후 다음 활동 시작 시간 자동 조정
+- place: 실제 장소명 (영문 또는 현지명). 예) "Senso-ji Temple, Asakusa"
+- note: 날씨 주의사항·예약 필요 여부·팁 등 (비용은 cost 필드에 별도 기재)
+
+#### 날씨 반영
+- 강수 확률 50% 이상인 날: 실내 관광지(박물관·쇼핑몰·실내 명소) 우선 배치
+- 폭염(최고 기온 35°C 이상): 오전 활동 집중, 오후 실내 휴식 배치
+- note에 당일 날씨 요약 기재. 예) "맑음 22°C, 선크림 필수"
+
+---
+
+### [STEP 3] current_itinerary가 있는 경우 — 수정 범위 최소화
+1. 사용자가 변경을 요청한 부분만 수정하고 나머지는 그대로 유지
+2. 변경된 장소의 날씨·동선은 반드시 재확인 (해당 날짜·지역 날씨 재조회)
+3. 새 장소 추가 시 search_place로 정보 확인 후 인접 장소와 find_route로 동선 재계산
+4. 수정된 **전체** 일정으로 submit_itinerary(day_plans) 호출 (변경 부분만 아닌 전체)
+
+---
+
+### [공통] submit_itinerary 호출
+- 정보 수집이 끝나면 즉시 호출한다. 응답 분리 없이 이 run에서 완료.
+- day_plans 키: "YYYY-MM-DD" 형식 실제 날짜. 예) "2026-05-01", "2026-05-02"
+- 모든 날짜에 항목이 있어야 함. 빈 날짜 허용 불가
+- 텍스트 응답: 일정 전체 요약 + 날씨·동선·예산 포인트 설명""",
 
     "change": """\
 ## 이번 요청: 여행 기본 정보 변경 (change)
@@ -177,14 +290,19 @@ async def search_flights(
     children: int = 0,
     child_ages: list[int] | None = None,
 ) -> dict:
-    """항공권 검색.
+    """항공권 검색. 출발편과 귀국편을 반드시 각각 한 번씩 총 두 번 호출해야 한다.
 
-    신규 일정 생성 시 반드시 호출. 기존 일정 수정 시에는 사용자가 항공편 변경을 요청할 때만 호출.
+    [필수 호출 패턴]
+    - 출발편: origin=출발지, destination=목적지, departure_date=출발일
+    - 귀국편: origin=목적지, destination=출발지, departure_date=귀국일
+    귀국편을 빠뜨리면 일정이 불완전하다.
+
     - origin/destination: 영문 도시명(Seoul, Tokyo, Osaka) 또는 IATA 코드(ICN, NRT, KIX) 모두 허용
     - departure_date: YYYY-MM-DD 형식. 예) "2026-05-15"
     - children >= 1이면 child_ages에 각 아이 나이를 반드시 포함. 개수 불일치 시 에러.
-      예) children=2, child_ages=[5, 8]
-    - 반환: {status, count, data: [{airline, origin, destination, total_amount, stops, departing_at}]}
+    - 반환: {status, count, data: [{airline, origin, destination, price_original(현지통화), currency, price_krw(한화 정수), stops, departing_at, arriving_at}]}
+    - cost 필드: {"amount": price_original, "currency": currency, "amount_krw": price_krw} 형식으로 기재.
+    - 반환된 항공편 중 price_krw·소요시간을 고려해 최적 1개를 선택, 1일차(출발편)와 마지막 날(귀국편) 일정에 포함
     """
     return await _service.process_task("duffel_flight", "search_flights", {
         "origin": origin,
@@ -206,14 +324,19 @@ async def search_hotels(
     children: int = 0,
     child_ages: list[int] | None = None,
 ) -> dict:
-    """숙소 검색.
+    """숙소 검색. 지역이 여러 곳이면 지역별로 분리하여 각각 호출한다.
 
-    신규 일정 생성 시 반드시 호출. 기존 일정 수정 시에는 사용자가 숙소 변경을 요청할 때만 호출.
+    [다중 지역 호출 패턴]
+    여행 중 도시 이동이 있으면 도시마다 별도 호출:
+      도쿄 2박: city_name="Tokyo", check_in="2026-05-01", check_out="2026-05-03"
+      오사카 2박: city_name="Osaka", check_in="2026-05-03", check_out="2026-05-05"
+
     - city_name: 영문 또는 한글 도시명. 예) "Tokyo", "Osaka", "도쿄"
-    - check_in/check_out: YYYY-MM-DD 형식. 예) check_in="2026-06-15", check_out="2026-06-18" (3박)
-    - children >= 1이면 child_ages에 각 아이 나이를 반드시 포함. 개수 불일치 시 에러.
-      예) children=1, child_ages=[7]
-    - 반환: {status, count, data: [{name, price, rating, address}]} 최대 10개
+    - check_in/check_out: YYYY-MM-DD 형식. check_out은 마지막 숙박일 다음 날.
+    - children >= 1이면 child_ages에 각 아이 나이를 반드시 포함.
+    - 반환: {status, count, data: [{name, price_original(현지통화), currency, price_krw(한화 정수), rating, address}]} 최대 10개
+    - cost 필드: {"amount": price_original, "currency": currency, "amount_krw": price_krw} 형식으로 기재.
+    - 예산(budget)이 있으면 price_krw 기준으로 가격대 맞는 숙소 선택. 체크인·아웃 항목을 해당 일차 일정에 추가하고 note에 숙소명 기재
     """
     return await _service.process_task("duffel_accommodation", "search_hotels", {
         "city_name": city_name,
@@ -264,10 +387,15 @@ async def search_web(
 async def get_weather(city: str, forecast_days: int = 7) -> dict:
     """날씨 예보 조회. 여행일이 오늘부터 16일 이내일 때 사용.
 
+    [다중 지역 호출 패턴] 여행 중 도시 이동이 있으면 지역별로 체류 기간만큼 분리 호출:
+      1~2일차 도쿄: get_weather("Tokyo", 2)
+      3~4일차 오사카: get_weather("Osaka", 2)
+    단일 도시 전체 기간: get_weather("Tokyo", 4)  ← 3박 4일
+
     - city: 반드시 영문 도시명. 예) "Seoul", "Tokyo", "Osaka" (한국어 입력 시 에러)
-    - forecast_days: 1~16 사이. 예) 3박 4일이면 4
-    - 반환 (forecast_days <= 4): {forecast_type="hourly", data: [{time, temperature, apparent_temperature, precipitation_probability, weather, windspeed}]}
-    - 반환 (forecast_days >= 5): {forecast_type="daily",  data: [{date, temperature_max, temperature_min, precipitation_probability_max, weather, uv_index_max}]}
+    - forecast_days: 1~16 사이. 여행 기간 일수와 일치시킬 것.
+    - 반환: {forecast_type="daily", data: [{date, temperature_max, temperature_min, precipitation_probability_max, weather}]}
+    - 날씨 결과를 각 날짜 일정에 반영: 강수확률 50% 이상이면 실내 활동 우선
     """
     return await _service.process_task("weather", "get_weather", {
         "city": city,
@@ -279,10 +407,14 @@ async def get_weather(city: str, forecast_days: int = 7) -> dict:
 async def get_historical_weather(city: str, start_date: str, end_date: str) -> dict:
     """과거 날씨 조회. 여행일이 오늘부터 16일 초과일 때 작년 같은 시기 데이터를 참고용으로 사용.
 
+    [다중 지역 호출 패턴] 도시 이동이 있으면 지역별로 분리 호출:
+      1~2일차 도쿄(2026-08-01~02): get_historical_weather("Tokyo", "2025-08-01", "2025-08-02")
+      3~4일차 오사카(2026-08-03~04): get_historical_weather("Osaka", "2025-08-03", "2025-08-04")
+
     - city: 반드시 영문 도시명. 예) "Seoul", "Tokyo" (한국어 입력 시 에러)
-    - start_date/end_date: YYYY-MM-DD 형식. 여행 날짜의 작년 같은 기간으로 설정.
-      예) 여행이 2026-08-01~2026-08-05이면 start_date="2025-08-01", end_date="2025-08-05"
-    - 반환: {forecast_type="historical", count, data: [{date, temperature_max, temperature_min, apparent_temperature_max, apparent_temperature_min, precipitation_sum, weather, uv_index_max}]}
+    - start_date/end_date: 여행 날짜의 작년 같은 기간. 예) 여행 2026-08-01~05 → "2025-08-01", "2025-08-05"
+    - 반환: {forecast_type="historical", data: [{date, temperature_max, temperature_min, precipitation_sum, weather, uv_index_max}]}
+    - 날씨 결과를 각 날짜 일정에 반영: 강수 가능성 높으면 실내 활동 우선
     """
     return await _service.process_task("weather", "get_historical_weather", {
         "city": city,
@@ -293,11 +425,16 @@ async def get_historical_weather(city: str, start_date: str, end_date: str) -> d
 
 @orchestrator_agent.tool_plain
 async def find_route(origin: str, dest: str, mode: str = "transit") -> dict:
-    """Google Maps 경로 및 소요 시간 조회.
+    """Google Maps 경로 및 소요 시간 조회. 하루 일정의 연속 방문 장소 쌍마다 각각 호출한다.
 
-    - origin/dest: 영문 장소명 또는 주소. 예) origin="Gyeongbokgung Palace, Seoul", dest="Namsan Tower, Seoul"
-    - mode: "transit"(대중교통, 기본값) / "driving"(자동차) / "walking"(도보) / "bicycling"(자전거)
-    - 반환: {status, data: {count, routes: [{start_address, end_address, distance(텍스트), duration(텍스트), steps}]}}
+    [필수 호출 패턴] 하루에 A→B→C→D를 방문하면 반드시 3번 호출:
+      find_route(A, B), find_route(B, C), find_route(C, D)
+    이동 시간을 각 항목의 time 필드에 반영하여 현실적인 시간표를 구성한다.
+
+    - origin/dest: 영문 장소명 + 도시명. 예) "Senso-ji Temple, Tokyo", "Shinjuku Station, Tokyo"
+    - mode: "transit"(대중교통, 기본값) / "walking"(도보, 1km 이내) / "driving" / "bicycling"
+    - 반환: {status, data: {routes: [{distance, duration, steps}]}}
+    - 이동 소요 시간을 일정 time에 반영: 예) 이동 30분이면 앞 일정 종료 후 30분 버퍼 추가
     """
     return await _service.process_task("google_maps", "find_route", {
         "origin": origin,
@@ -308,10 +445,12 @@ async def find_route(origin: str, dest: str, mode: str = "transit") -> dict:
 
 @orchestrator_agent.tool_plain
 async def search_place(query: str) -> dict:
-    """Google Maps 장소 검색. 식당·관광지·카페 등 위치·평점·주소 정보 조회.
+    """Google Maps 장소 검색. 방문 예정인 관광지·식당·카페를 개별 검색하여 위치·평점 확인.
 
-    - query: 장소명 또는 키워드. 예) "신주쿠 라멘 맛집", "오사카 도톤보리", "교토 금각사"
-    - 반환: {status, data: {count, places: [{name, formatted_address, lat, lng, rating, user_ratings_total, types}]}}
+    - query: 구체적인 장소명 또는 키워드. 예) "Senso-ji Temple Tokyo", "도쿄 신주쿠 라멘 맛집"
+    - 검색 결과의 rating·user_ratings_total로 장소 품질 판단. 평점 3.5 미만이면 대안 검색 권장.
+    - 반환: {status, data: {places: [{name, formatted_address, lat, lng, rating, user_ratings_total, types}]}}
+    - 확인한 장소명·주소를 find_route 호출 시 origin/dest로 사용
     """
     return await _service.process_task("google_maps", "search_place", {
         "query": query,
@@ -321,6 +460,12 @@ async def search_place(query: str) -> dict:
 @orchestrator_agent.tool
 async def submit_itinerary(ctx: RunContext[OrchestratorDeps], day_plans: dict[str, list[DayPlanItem]]) -> dict:
     """itinerary 타입 전용. 일정 생성/수정 완료 시 반드시 호출. 구조화된 dayPlans를 시스템에 전달한다."""
+    # cost.amount_krw 자동 변환: LLM이 현지 통화만 채운 항목을 한화로 변환
+    for items in day_plans.values():
+        for item in items:
+            if item.cost and item.cost.currency != "KRW" and item.cost.amount_krw is None:
+                item.cost.amount_krw = await to_krw(item.cost.amount, item.cost.currency)
+
     ctx.deps.captured["itinerary"] = day_plans
     return {"status": "success", "message": "일정이 저장되었습니다."}
 

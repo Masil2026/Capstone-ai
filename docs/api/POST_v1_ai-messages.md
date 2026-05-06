@@ -176,24 +176,48 @@ FastAPI는 두 종류의 SSE 이벤트를 순서대로 전송합니다.
     "dayPlans": {
       "2026-05-01": [
         {
-          "plan_name": "창덕궁 방문",
-          "time": "09:00 ~ 12:00",
-          "place": "창덕궁",
-          "note": "후원 투어 예약 필요"
+          "plan_name": "인천공항 → 나리타공항 (대한항공 KE705)",
+          "time": "10:00 ~ 12:30",
+          "place": "Narita International Airport",
+          "note": "대한항공 KE705, 직항 2시간 30분",
+          "cost": { "amount": 450000, "currency": "KRW" }
         },
         {
-          "plan_name": "광장시장 점심",
-          "time": "12:00 ~ 14:30",
-          "place": "광장시장",
-          "note": ""
+          "plan_name": "나리타공항 → 신주쿠역 이동 (나리타 익스프레스)",
+          "time": "13:30 ~ 15:00",
+          "place": "Narita Express (NEX)",
+          "note": "신주쿠 직행, 약 90분",
+          "cost": { "amount": 3070, "currency": "JPY" }
+        },
+        {
+          "plan_name": "저녁식사 — 신주쿠 라멘",
+          "time": "18:30 ~ 19:30",
+          "place": "Fuunji Ramen, Shinjuku",
+          "note": "",
+          "cost": { "amount": 1200, "currency": "JPY" }
         }
       ],
       "2026-05-02": [
         {
-          "plan_name": "남산타워 방문",
-          "time": "10:00 ~ 12:00",
-          "place": "남산타워",
-          "note": ""
+          "plan_name": "아침식사 — 숙소 조식",
+          "time": "08:00 ~ 09:00",
+          "place": "Shinjuku Grand Hotel",
+          "note": "조식 포함 요금",
+          "cost": null
+        },
+        {
+          "plan_name": "신주쿠역 → 아사쿠사역 이동 (지하철 오에도선)",
+          "time": "09:00 ~ 09:35",
+          "place": "Tokyo Metro 오에도선",
+          "note": "타쿠타마 방향 탑승, 아사쿠사역 하차",
+          "cost": { "amount": 280, "currency": "JPY" }
+        },
+        {
+          "plan_name": "센소지 참배 및 나카미세 거리 쇼핑",
+          "time": "09:35 ~ 11:30",
+          "place": "Senso-ji Temple, Asakusa",
+          "note": "맑음 22°C, 선크림 필수",
+          "cost": null
         }
       ]
     }
@@ -205,10 +229,18 @@ FastAPI는 두 종류의 SSE 이벤트를 순서대로 전송합니다.
 
 | Field | Required | Type | Description |
 | --- | --- | --- | --- |
-| plan_name | Y | String | 일정 이름 |
+| plan_name | Y | String | 일정 이름. 이동 항목은 `"{출발} → {도착} 이동 ({수단})"` 형식 |
 | time | Y | String | 시간대. `"HH:MM ~ HH:MM"` 형식 (예: `"09:00 ~ 12:00"`) |
-| place | Y | String | 장소명 |
+| place | Y | String | 장소명 또는 이동 수단·노선명 |
 | note | N | String | 메모. 생략 시 빈 문자열(`""`)로 처리 |
+| cost | N | Object \| null | 1인 기준 예상 비용. 무료이면 `null` |
+
+### **cost 객체 구조**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| amount | Number | 1인 기준 금액 (소수점 허용) |
+| currency | String | ISO 4217 통화 코드. 예) `"KRW"`, `"JPY"`, `"USD"`, `"CNY"` |
 
 > `status`는 payload에 포함하지 않습니다. Spring Boot가 기존 time 값 기준으로 결정합니다 (동일 time → 기존 status 유지, 신규 아이템 → `"todo"`).
 > 

@@ -20,11 +20,18 @@ class AiMessageRequest(BaseModel):
 
 # ── classification_agent 출력 (내부 구조체) ───────────────────────────────────
 
+class ItemCost(BaseModel):
+    amount: float               # 현지 통화 금액 (1인 기준). 예) 1500.0, 280.0
+    currency: str               # ISO 4217 현지 통화 코드. 예) "JPY", "USD", "KRW"
+    amount_krw: int | None = None  # 한화 환산 금액. currency == "KRW"이면 null
+
+
 class DayPlanItem(BaseModel):
     plan_name: str
     time: str                   # "HH:MM ~ HH:MM"
     place: str
     note: str = ""
+    cost: ItemCost | None = None  # 예상 비용 (1인 기준). 무료이면 null
 
 
 class ResponseClassification(BaseModel):
