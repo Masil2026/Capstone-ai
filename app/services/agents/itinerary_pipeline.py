@@ -325,9 +325,9 @@ async def _fetch_web_summary(destination: str, preferences: dict | None) -> str:
 async def _fetch_weather(destination: str, start_date: str, end_date: str, today: str) -> list[dict]:
     try:
         city = destination.split(",")[0].strip()
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
-        today_dt = datetime.strptime(today, "%Y-%m-%d").date()
+        start_dt = datetime.strptime(start_date[:10], "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date[:10], "%Y-%m-%d").date()
+        today_dt = datetime.strptime(today[:10], "%Y-%m-%d").date()
         total_days = max((end_dt - start_dt).days + 1, 1)
         days_until = (start_dt - today_dt).days
 
@@ -357,12 +357,12 @@ async def _fetch_flights(
     depart, ret = await asyncio.gather(
         _service.process_task("duffel_flight", "search_flights", {
             "origin": _DEFAULT_ORIGIN, "destination": city,
-            "departure_date": start_date,
+            "departure_date": start_date[:10],
             "adults": adults, "children": children, "child_ages": child_ages,
         }),
         _service.process_task("duffel_flight", "search_flights", {
             "origin": city, "destination": _DEFAULT_ORIGIN,
-            "departure_date": end_date,
+            "departure_date": end_date[:10],
             "adults": adults, "children": children, "child_ages": child_ages,
         }),
         return_exceptions=True,
@@ -382,8 +382,8 @@ async def _fetch_hotels(
     try:
         return await _service.process_task("duffel_accommodation", "search_hotels", {
             "city_name": city,
-            "check_in": start_date,
-            "check_out": end_date,
+            "check_in": start_date[:10],
+            "check_out": end_date[:10],
             "adults": adults,
             "children": children,
             "child_ages": child_ages,

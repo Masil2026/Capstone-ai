@@ -203,14 +203,18 @@ async def get_weather(city: str, forecast_days: int = 7) -> dict:
 
 @orchestrator_agent.tool_plain
 async def get_historical_weather(city: str, start_date: str, end_date: str) -> dict:
-    """과거 날씨 조회. 여행일이 오늘부터 16일 초과일 때 작년 같은 시기 데이터를 참고용으로 사용.
+    """과거/장기 날씨 조회. 다음 두 경우에 사용:
+    (1) 여행일이 오늘부터 16일 초과인 미래 — 작년 같은 기간 데이터를 참고용으로 사용
+    (2) 여행일이 이미 지난 날짜 — 그 기간의 실제 날씨 데이터 조회
 
     [다중 지역 호출 패턴] 도시 이동이 있으면 지역별로 분리 호출:
       1~2일차 도쿄(2026-08-01~02): get_historical_weather("Tokyo", "2025-08-01", "2025-08-02")
       3~4일차 오사카(2026-08-03~04): get_historical_weather("Osaka", "2025-08-03", "2025-08-04")
 
     - city: 반드시 영문 도시명. 예) "Seoul", "Tokyo" (한국어 입력 시 에러)
-    - start_date/end_date: 여행 날짜의 작년 같은 기간. 예) 여행 2026-08-01~05 → "2025-08-01", "2025-08-05"
+    - start_date/end_date:
+        미래 여행: 여행 날짜의 작년 같은 기간. 예) 여행 2026-08-01~05 → "2025-08-01", "2025-08-05"
+        과거 여행: 여행 날짜 그대로. 예) 여행 2026-05-01~03 → "2026-05-01", "2026-05-03"
     - 반환: {forecast_type="historical", data: [{date, temperature_max, temperature_min, precipitation_sum, weather, uv_index_max}]}
     - 날씨 결과를 각 날짜 일정에 반영: 강수 가능성 높으면 실내 활동 우선
     """

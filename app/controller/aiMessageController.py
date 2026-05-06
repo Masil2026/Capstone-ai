@@ -37,17 +37,17 @@ def _sse(event: str, payload: dict) -> str:
 
 _SSE_EXAMPLE = (
     "event: chunk\n"
-    'data: {"content": "5월 도쿄는 맑고 따뜻한 날씨입니다!"}\n\n'
+    'data: {"content": "날씨가 맑고 여행하기 좋은 날씨입니다!"}\n\n'
     "event: done\n"
     "data: {\n"
     'data:   "type": "chat",\n'
     'data:   "userMessage": {\n'
-    'data:     "content": "도쿄 날씨 어때?",\n'
-    'data:     "embedding": [0.023, -0.12, "...(1536차원)"]\n'
+    'data:     "content": "날씨 어때?",\n'
+    'data:     "embedding": ["...(1536차원)"]\n'
     "data:   },\n"
     'data:   "assistantMessage": {\n'
-    'data:     "content": "5월 도쿄는 맑고 따뜻한 날씨입니다!",\n'
-    'data:     "embedding": [0.087, 0.002, "...(1536차원)"]\n'
+    'data:     "content": "날씨가 맑고 여행하기 좋은 날씨입니다!",\n'
+    'data:     "embedding": ["...(1536차원)"]\n'
     "data:   },\n"
     'data:   "memory": null\n'
     "data: }\n\n"
@@ -107,7 +107,6 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         current_itinerary=ctx["current_itinerary"],
         request_type=request_type,
     )
-
     # [4] 에이전트 실행 — itinerary는 파이프라인, 그 외는 오케스트레이터
     try:
         if request_type == "itinerary":
@@ -149,9 +148,11 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     except Exception:
         assistant_embedding = None
 
-    # [8] Redis memory 갱신
-    if orch_result.ai_summary or orch_result.preferences:
-        await save_memory(room_id, orch_result.ai_summary, orch_result.preferences)
+    # [8] Redis memory 갱신 — None 필드는 기존 값 유지하여 기억 손실 방지
+    if orch_result.ai_summary is not None or orch_result.preferences is not None:
+        merged_summary = orch_result.ai_summary if orch_result.ai_summary is not None else ctx["ai_summary"]
+        merged_prefs = orch_result.preferences if orch_result.preferences is not None else ctx["preferences"]
+        await save_memory(room_id, merged_summary, merged_prefs)
 
     # [9] done 이벤트 전송
     done = _build_done_event(

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from datetime import date, datetime
 from typing import Any
 
 import json as _json
@@ -17,6 +19,7 @@ from .memory import load_memory, save_memory, save_history
 
 _openai_client = AsyncOpenAI(api_key=settings.GPT_API_KEY)
 _EMBEDDING_MODEL = "text-embedding-3-small"
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +50,7 @@ def _query_recent_history(room_id: str) -> list:
             ),
             {"room_id": room_id},
         ).fetchall()
+        rows = list(rows)  # Row 데이터를 세션 종료 전에 Python 객체로 완전히 복사
 
     raw = []
     for row in reversed(rows):  # 오래된 순으로
@@ -84,7 +88,7 @@ def _query_similar_messages(room_id: str, embedding: list[float]) -> list[dict]:
             ),
             {"room_id": room_id, "emb": str(embedding)},
         ).fetchall()
-    return [{"role": r.role, "content": r.content} for r in rows]
+        return [{"role": r.role, "content": r.content} for r in rows]
 
 
 def _query_chat_room_memory(room_id: str) -> dict:
@@ -94,12 +98,21 @@ def _query_chat_room_memory(room_id: str) -> dict:
             text("SELECT ai_summary, preferences FROM chat_rooms WHERE id = :room_id"),
             {"room_id": room_id},
         ).fetchone()
-    if row is None:
-        return {"ai_summary": None, "preferences": None}
-    preferences = row.preferences
-    if isinstance(preferences, str):
-        preferences = json.loads(preferences)
-    return {"ai_summary": row.ai_summary, "preferences": preferences}
+        if row is None:
+            return {"ai_summary": None, "preferences": None}
+        preferences = row.preferences
+        if isinstance(preferences, str):
+            preferences = json.loads(preferences)
+        return {"ai_summary": row.ai_summary, "preferences": preferences}
+
+
+def _to_date_str(value) -> str:
+    """datetime / date / str 모두 'YYYY-MM-DD' 형식으로 정규화"""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)[:10]  # "2026-04-30T15:00:00+00:00" → "2026-04-30"
 
 
 def _query_current_itinerary(room_id: str) -> dict | None:
@@ -116,28 +129,28 @@ def _query_current_itinerary(room_id: str) -> dict | None:
             {"room_id": room_id},
         ).fetchone()
 
-    if row is None:
-        return None
+        if row is None:
+            return None
 
-    day_plans = row.day_plans
-    if isinstance(day_plans, str):
-        day_plans = json.loads(day_plans)
+        day_plans = row.day_plans
+        if isinstance(day_plans, str):
+            day_plans = json.loads(day_plans)
 
-    child_ages = row.child_ages
-    if isinstance(child_ages, str):
-        child_ages = json.loads(child_ages)
+        child_ages = row.child_ages
+        if isinstance(child_ages, str):
+            child_ages = json.loads(child_ages)
 
-    return {
-        "destination": row.destination,
-        "start_date": str(row.start_date),
-        "end_date": str(row.end_date),
-        "total_days": row.total_days,
-        "budget": float(row.budget) if row.budget is not None else None,
-        "adult_count": row.adult_count,
-        "child_count": row.child_count,
-        "child_ages": child_ages or [],
-        "day_plans": day_plans,
-    }
+        return {
+            "destination": row.destination,
+            "start_date": _to_date_str(row.start_date),
+            "end_date": _to_date_str(row.end_date),
+            "total_days": row.total_days,
+            "budget": float(row.budget) if row.budget is not None else None,
+            "adult_count": row.adult_count,
+            "child_count": row.child_count,
+            "child_ages": child_ages or [],
+            "day_plans": day_plans,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +197,13 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     try:
         current_itinerary = await itinerary_fut
     except Exception:
+        _log.error("current_itinerary 로드 실패", exc_info=True)
         current_itinerary = None
 
     try:
         history = await history_fut
     except Exception:
+        _log.error("history 로드 실패", exc_info=True)
         history = []
 
     # DB에서 읽은 히스토리를 Redis에 mirror (비동기 fire-and-forget)
