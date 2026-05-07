@@ -130,6 +130,8 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
     budget_str = f"{budget:,.0f}원" if budget else "제한 없음"
     child_str = f"어린이 {children}명 (나이: {child_ages})" if children else "없음"
 
+    existing_plans = info.get("day_plans")
+
     lines = [
         "당신은 여행 일정 플래너입니다.",
         f"여행지: {dest} | 기간: {start} ~ {end} ({total_days}일) | 오늘: {d.today}",
@@ -139,22 +141,23 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "아래 데이터를 바탕으로 3가지를 결정하고 PlannerOutput을 반환하라:",
         "1. selected_flights: 출발편·귀국편 각 1개 선택 (direction='depart'/'return')",
         "2. selected_hotels: 예산에 맞는 숙소 1개 선택",
-        "3. days: 각 날짜별 ordered_queries (방문 순서대로 장소 검색어 목록)",
+        "3. days: ordered_queries (방문 순서대로 장소 검색어 목록)",
+        "   - 기존 일정이 없으면: 전체 날짜에 대해 작성",
+        "   - 기존 일정이 있으면: **사용자가 수정 요청한 날짜만** 작성 (나머지 날짜는 days에 포함하지 않는다)",
         "",
         "## ordered_queries 작성 규칙",
         "- 방문 순서 그대로: 아침식사 → 관광지 → 이동 → 점심 → 관광지 → 저녁 순",
         "- 하루 총 7~10개 항목 (관광지 3~5개 + 식사 3개)",
         "- 같은 지역 거점 내 장소끼리 묶어 이동 최소화",
         "- 비 예보(강수확률 50% 이상): 실내 관광지 우선",
-        "- 1일차: 출발편 도착 시간 이후부터 일정 시작",
-        "- 마지막 날: 귀국편 탑승 2~3시간 전까지 일정 종료",
+        "- 1일차(신규): 출발편 도착 시간 이후부터 일정 시작",
+        "- 마지막 날(신규): 귀국편 탑승 2~3시간 전까지 일정 종료",
         "- 검색어 형식: '장소명 도시명 (영문)' — Google Maps 검색에 사용",
         "  예) 'Senso-ji Temple Asakusa Tokyo', 'tonkotsu ramen Shinjuku Tokyo lunch'",
     ]
 
-    existing_plans = info.get("day_plans")
     if existing_plans:
-        lines += ["", "## 기존 일정 (수정 요청이면 이 일정을 기준으로 변경할 것)"]
+        lines += ["", "## 기존 일정 (반드시 이 내용을 기준으로, 요청된 날짜만 수정할 것)"]
         for date_key, items in existing_plans.items():
             lines.append(f"### {date_key}")
             for item in items:
@@ -268,7 +271,7 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "    예) '1일차는 아사쿠사 → 센소지 → 나카미세 거리 코스로, 저녁에는 원하신 참치회 식당을 배치했습니다. 2일차는 신주쿠 쇼핑 코스로 구성했습니다.'",
         "  - 기존 일정(## 기존 일정)이 있으면 수정: 반영한 요청과 변경 결과를 구체적으로 설명한다.",
         "    예) '해산물 요청을 반영해 1일차 저녁을 해산물 식당으로 변경했습니다. 3일차에는 시장 방문 코스를 새로 추가했습니다.'",
-        "- `day_plans`: 모든 날짜 필수. 키='YYYY-MM-DD'",
+        "- `day_plans`: 키='YYYY-MM-DD'. 신규 생성이면 모든 날짜, 수정이면 요청된 날짜만 반환 (나머지는 포함하지 않는다).",
         "- `ai_summary`: 번호 목록 형식으로 작성한다.",
         "  형식: 각 항목을 '1. 2. 3.' 번호로 나열. 항목당 한 줄로 핵심 사실만 기술.",
         "  예) '1. 제주도 3박 4일 일정 생성 (5월 1일~3일, 성인 2명, 예산 30만원)\\n2. 1일차 저녁 해산물 식당 요청 반영\\n3. 숙소: 제주 그랜드 호텔 (5월 1일~3일)'",

@@ -53,7 +53,9 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 
 **[응답 형식 — 반드시 준수]**
 반환 JSON의 필드를 아래와 같이 채워야 한다:
-- `day_plans`: 날짜별 일정 (키='YYYY-MM-DD'). 모든 날짜 필수.
+- `day_plans`: 날짜별 일정 (키='YYYY-MM-DD').
+  - **신규 생성** (기존 일정 없음): 모든 날짜 포함.
+  - **수정** (기존 일정 있음): **사용자가 요청한 날짜만** 반환. 나머지 날짜는 포함하지 않는다.
 - `message`: 아래 기준으로 작성한다.
   - **신규 생성**: 날짜별 주요 코스를 간략히 소개한다.
     예) "1일차는 아사쿠사 → 센소지 → 나카미세 거리 코스로, 저녁에는 원하신 참치회 식당을 배치했습니다. 2일차는 신주쿠 → 하라주쿠 쇼핑 코스로 구성했습니다."
@@ -66,7 +68,7 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 2. current_itinerary가 없거나 destination·start_date가 비어있으면 일정을 생성하지 말고,
    사용자에게 여행지·날짜·인원·예산을 먼저 물어봐라. (day_plans는 null로 둔다)
 3. 기본 정보가 모두 있으면 get_weather, search_web, search_place, find_route 도구를 활용해 일정을 구성한다.
-4. 기존 day_plans가 있으면 사용자 요청에 따라 해당 부분만 수정하고 나머지는 유지한다.""",
+4. 기존 day_plans가 있으면 사용자 요청에 해당하는 날짜 일정만 새로 작성하여 반환한다.""",
 
     "change": """\
 ## 이번 요청: 여행 기본 정보 변경 (change)
@@ -198,16 +200,28 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
         budget = it.get("budget")
         budget_str = f"{int(budget):,}원" if budget else "미설정"
         day_plans = it.get("day_plans")
-        day_plans_str = f"{len(day_plans)}일치 일정 존재" if day_plans else "아직 없음"
-        sections.append(
-            "## 현재 여행 기본 정보 (DB에서 조회된 실제 값 — 반드시 이 데이터를 기준으로 답변할 것)\n"
-            f"- 여행지: {it.get('destination')}\n"
-            f"- 여행 기간: {it.get('start_date')} ~ {it.get('end_date')} ({it.get('total_days')}일)\n"
-            f"- 예산: {budget_str}\n"
-            f"- 성인: {it.get('adult_count')}명\n"
-            f"- 어린이: {child_str}\n"
-            f"- day_plans: {day_plans_str}"
-        )
+
+        section_lines = [
+            "## 현재 여행 기본 정보 (DB에서 조회된 실제 값 — 반드시 이 데이터를 기준으로 답변할 것)",
+            f"- 여행지: {it.get('destination')}",
+            f"- 여행 기간: {it.get('start_date')} ~ {it.get('end_date')} ({it.get('total_days')}일)",
+            f"- 예산: {budget_str}",
+            f"- 성인: {it.get('adult_count')}명",
+            f"- 어린이: {child_str}",
+        ]
+        if day_plans:
+            section_lines.append("")
+            section_lines.append("### 기존 일정 (수정 시 반드시 이 내용을 기준으로 변경할 것)")
+            for date_key, items in day_plans.items():
+                section_lines.append(f"#### {date_key}")
+                for item in items:
+                    if isinstance(item, dict):
+                        section_lines.append(
+                            f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})"
+                        )
+        else:
+            section_lines.append("- day_plans: 아직 없음")
+        sections.append("\n".join(section_lines))
     else:
         sections.append("## 현재 여행 기본 정보\n아직 여행 일정이 등록되지 않았습니다.")
 
