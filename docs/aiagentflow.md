@@ -47,7 +47,7 @@ DB chat_rooms 직접 조회 (매 요청마다)
 > **Redis 캐시-히트 로직 없음.** 매 요청마다 무조건 DB에서 읽습니다.
 > Redis 동기화는 검증 목적으로, 이후 파이프라인에서 Redis를 활용하는 경우를 위한 사전 정렬입니다.
 
-동기화 후 `chat_history:{chat_room_id}`에서 대화 이력을 로드합니다.
+동기화와 별개로, 대화 이력은 매 요청마다 **DB `chat_messages` 직접 조회**로 로드합니다 (Redis 캐시 미사용).
 
 ---
 
@@ -303,6 +303,9 @@ POST /api/v1/ai-messages (Spring Boot 요청)
     type 그 외 → orchestrator_agent.run(user_message, deps, history)
     ├─ type에 맞는 외부 API 도구 호출
     └─ OrchestratorResult 구조화 출력 반환
+    ※ day_plans 반환 정책:
+       - 신규 생성: 전체 날짜 포함
+       - 수정:     사용자가 요청한 날짜만 반환 (변경 없는 날짜는 포함하지 않음)
   ↓
 [6] chunk 이벤트 전송 (full_response 한 번에)
   ↓
@@ -330,15 +333,15 @@ AI 에이전트는 **DB(PostgreSQL)를 진실의 원천(source of truth)**으로
 
 | Redis 키 | 타입 | 내용 |
 |----------|------|------|
-| `memory:{chat_room_id}` | JSON | `ai_summary`(text) + `preferences`(json) + `loaded_at`(ISO 8601) |
-| `chat_history:{chat_room_id}` | bytes (JSON) | 최근 **20개** 메시지 mirror (DB chat_messages 기반) |
+| `memory:{chat_room_id}` | JSON | `ai_summary`(text) + `preferences`(json) |
+| `chatroom_history:{room_id}` | bytes (JSON) | 최근 **20개** 메시지 raw 이력 (테스트·검증용) |
+| `pgchatroom_history:{room_id}` | bytes (JSON) | pgvector 유사도 검색 결과 상위 5개 (테스트·검증용) |
 
 `memory` 키 구조:
 ```json
 {
   "ai_summary": "지금까지의 대화 전체 누적 요약",
-  "preferences": { "food": "noodle", "transport": "transit" },
-  "loaded_at": "2026-04-10T12:00:00Z"
+  "preferences": { "food": "noodle", "transport": "transit" }
 }
 ```
 
