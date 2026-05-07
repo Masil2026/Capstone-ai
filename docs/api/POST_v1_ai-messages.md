@@ -118,15 +118,22 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 
 ```json
 {
-  "aiSummary": "도쿄 3박 여행. 예산 50만원. 혼자 여행 선호.",
+  "aiSummary": "도쿄 3박 여행. 예산 50만원. 혼자 여행 선호. 맛집 위주 일정으로 수정 요청.",
   "preferences": {
     "budget": "economy",
-    "style": "adventure"
+    "style": "adventure",
+    "food": "local_restaurant"
   }
 }
 ```
 
+| 필드 | 설명 |
+|------|------|
+| `aiSummary` | **이전 ai_summary + 현재 대화를 합산한 전체 누적 재요약.** 현재 턴만의 요약이 아니라 대화 전체 흐름을 한 번에 담습니다. |
+| `preferences` | **이전 preferences 내용을 포함한 전체 dict.** 새 항목만이 아니라 기존 항목을 유지하면서 업데이트된 전체 값입니다. |
+
 > Spring Boot는 수신 후 `chat_rooms.ai_summary`, `chat_rooms.preferences`에 저장합니다.
+> 저장된 값은 다음 요청 시 FastAPI가 DB에서 직접 읽어 LLM 컨텍스트에 주입합니다.
 > 
 
 ---
@@ -406,13 +413,11 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 ### **4.1 FastAPI 처리 흐름 (Sequence)**
 
 1. **Token Validation**: 요청 헤더 `X-Internal-Token` 값을 환경변수와 비교하여 검증합니다.
-2. **Context Load**: `roomId`를 기준으로 필요한 컨텍스트를 조회합니다.
-    - Redis `chat_history:{roomId}`: 최근 대화 이력 (최대 20개)
-    - Redis `memory:{roomId}`: `ai_summary`, `preferences` 캐시
-        - Redis hit → 캐시 값 사용
-        - Redis miss → DB `chat_rooms`에서 로드 후 Redis에 저장
-    - DB `chat_messages` (pgvector): 유사 과거 메시지 최대 5개
-    - DB `itineraries`: 현재 여행 일정 (`day_plans` 포함)
+2. **Context Load**: `roomId`를 기준으로 필요한 컨텍스트를 조회합니다. **매 요청마다 DB에서 직접 조회합니다 (Redis 캐시 히트 로직 없음).**
+    - DB `chat_rooms`: `ai_summary`, `preferences` 직접 조회 → 조회 후 Redis `memory:{roomId}` 동기화 (fire-and-forget)
+    - DB `chat_messages`: 최근 20개 대화 이력 (시간 역순 조회 후 pydantic-ai ModelMessage 변환)
+    - DB `chat_messages` (pgvector): 유사 과거 메시지 최대 5개 (코사인 유사도 기준)
+    - DB `itineraries`: 현재 여행 일정 전체 (destination·start_date·end_date·budget·adult_count·child_count·child_ages·day_plans 포함)
 3. **Agent 처리 및 type 판별**: 대화 이력, memory, 사용자 메시지를 기반으로 Agent가 요청 의도를 분석하고 `type`을 판별합니다.
     - `"chat"`
     - `"itinerary"`
@@ -434,11 +439,11 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 8. **Embedding 생성**: 응답 완료 후 사용자 메시지 및 AI 응답에 대한 임베딩 벡터를 생성합니다.
     - 임베딩 모델: OpenAI `text-embedding-3-small`
     - dim = `1536`
-9. **Memory 갱신 판단**: LLM 결과를 기반으로 이번 턴에서 memory 갱신이 필요한지 판단합니다.
-    - 사용자의 선호도, 예산, 여행 스타일, 동행 정보 등 장기 기억할 정보가 있으면 Redis memory를 업데이트합니다.
-    - 변경 사항이 있으면 `done.memory`에 갱신된 `aiSummary`, `preferences`를 포함합니다.
-    - 변경 사항이 없으면 `done.memory`는 `null`로 전송합니다.
-    - `memory`는 `type`과 무관하게 포함될 수 있습니다. 즉 `"chat"`, `"change"`, `"reservation"`, `"cancel"` 타입에서도 memory 변경이 있으면 `null`이 아닌 값이 내려올 수 있습니다.
+9. **Memory 갱신 판단**: OrchestratorResult에 `ai_summary` 또는 `preferences` 값이 있으면 Redis memory를 업데이트합니다.
+    - `aiSummary`: **이전 ai_summary + 현재 대화를 합산한 전체 누적 재요약** (현재 턴만의 요약이 아님)
+    - `preferences`: **이전 preferences를 유지하면서 신규 항목을 추가/수정한 전체 dict** (delta가 아닌 전체 값)
+    - 변경 사항이 있으면 `done.memory`에 merged 값 포함, 없으면 `null` 전송
+    - `memory`는 `type`과 무관합니다. `"chat"` 타입에서도 새 취향이 감지되면 포함될 수 있습니다.
 10. **done 전송**: `type`, 메시지 임베딩, 갱신된 `memory`, type별 조건부 페이로드를 포함한 `done` 이벤트를 전송합니다.
 
 > FastAPI는 DB에 직접 쓰지 않습니다. 모든 DB 저장은 Spring Boot가 `done` 이벤트 수신 후 처리합니다. FastAPI의 DB 접근은 벡터 유사도 검색 등 read-only에 한합니다.
@@ -489,15 +494,27 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 ```
 대화 시작 (roomId + content)
 ↓
-Redis memory:{roomId} 확인
-  hit  → Redis 캐시 사용
-  miss → DB chat_rooms에서 로드 → Redis에 저장
+DB chat_rooms에서 ai_summary / preferences 직접 조회 (매 요청마다)
 ↓
-Redis memory + chat_history 기반으로 LLM 처리
+조회 결과로 Redis memory:{roomId} 동기화 (fire-and-forget)
 ↓
-LLM이 update_memory 호출 시 → Redis memory 갱신
+DB 값을 OrchestratorDeps에 주입 → LLM 처리
+  - ai_summary: 이전 요약 전체를 LLM에게 제공
+  - preferences: 이전 취향 전체를 LLM에게 제공
 ↓
-done 이벤트에 갱신된 memory 포함 → Spring Boot → DB chat_rooms 저장
+LLM이 OrchestratorResult.ai_summary 생성 시
+  → 이전 ai_summary + 현재 대화를 합산한 전체 누적 재요약 작성
+LLM이 OrchestratorResult.preferences 생성 시
+  → 이전 preferences 유지 + 신규 항목 추가/수정한 전체 dict 작성
+↓
+merged_summary / merged_prefs 계산
+  (LLM 생성 값이 있으면 사용, 없으면 DB에서 읽은 기존 값 유지)
+↓
+변경 있음 → Redis memory 갱신 → done.memory 포함
+변경 없음 → done.memory = null
+↓
+Spring Boot가 done.memory를 받아 DB chat_rooms 저장
+  → 다음 요청 시 FastAPI가 이 값을 DB에서 직접 읽음
 ```
 
 ---

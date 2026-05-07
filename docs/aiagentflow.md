@@ -30,22 +30,22 @@ Spring Boot → FastAPI 호출은 Clerk JWT가 아닌 **내부 공유 시크릿*
 
 ---
 
-## 1. 메모리 동기화 — Redis
+## 1. 컨텍스트 로드 — DB read + Redis 동기화
 
-매 요청마다 Spring Boot가 전달한 `memory`(body)와 Redis에 저장된 `memory:{chat_room_id}`를 비교합니다.
+매 요청마다 `roomId`를 기반으로 DB에서 최신 값을 직접 조회하고, 조회 결과를 Redis에 동기화(덮어씀)합니다.
 
 ```
-요청 body.memory  |  Redis memory:{chat_room_id}  →  결과
-─────────────────────────────────────────────────────────────
-있음              |  없음                         →  Redis에 저장
-있음              |  있음, 값이 다름              →  요청 기준으로 Redis 전체 교체 (merge 아님)
-있음              |  있음, 값이 같음              →  유지
-null              |  있음                         →  Redis 값 유지
-null              |  없음                         →  memory 없이 대화 진행
+요청 시작
+  ↓
+DB chat_rooms 직접 조회 (매 요청마다)
+  → ai_summary, preferences 로드
+  ↓
+조회 결과로 Redis memory:{chat_room_id} 덮어쓰기 (fire-and-forget)
+  → Java 백엔드가 직전 done 이벤트를 보고 DB에 저장한 최신 값이 Redis에 반영됨
 ```
 
-> 동기화는 `aiSummary`와 `preferences` 두 필드를 하나의 단위로 취급합니다.
-> 어느 한 쪽만 다르더라도 `memory` 전체를 요청 값으로 교체합니다.
+> **Redis 캐시-히트 로직 없음.** 매 요청마다 무조건 DB에서 읽습니다.
+> Redis 동기화는 검증 목적으로, 이후 파이프라인에서 Redis를 활용하는 경우를 위한 사전 정렬입니다.
 
 동기화 후 `chat_history:{chat_room_id}`에서 대화 이력을 로드합니다.
 
@@ -94,13 +94,13 @@ orchestrator가 응답 생성 시 활용하는 컨텍스트:
 
 | 소스 | 내용 | 저장소 |
 |------|------|--------|
-| ai_summary | 전체 대화 요약 | Redis memory |
-| preferences | 사용자 취향 JSON | Redis memory |
-| chat_history | 최근 20개 메시지 | Redis |
+| ai_summary | 전체 대화 누적 요약 | DB chat_rooms (매 요청 직접 조회) |
+| preferences | 사용자 취향 JSON (전체 누적) | DB chat_rooms (매 요청 직접 조회) |
+| chat_history | 최근 20개 메시지 | DB chat_messages (매 요청 직접 조회) |
 | 유사 과거 메시지 | 의미적으로 유사한 과거 대화 최대 5개 | pgvector (read-only) |
-| current_itinerary | 현재 여행 일정 dayPlans | PostgreSQL (read-only) |
+| current_itinerary | 현재 여행 일정 전체 (destination·dates·budget·adults 포함) | DB itineraries (read-only) |
 
-> FastAPI의 DB 접근은 유사도 검색 및 현재 일정 조회에 한정된 read-only입니다. 모든 DB 쓰기는 Spring Boot가 담당합니다.
+> FastAPI의 DB 접근은 **read-only**에 한합니다. 모든 DB 쓰기는 Java(Spring Boot)가 `done` 이벤트 수신 후 처리합니다.
 
 ---
 
@@ -133,15 +133,15 @@ class OrchestratorDeps:
 classification_agent가 판별한 `type`은 `OrchestratorDeps.request_type`으로 전달됩니다.
 orchestrator는 이를 참고해 적절한 도구를 선택합니다.
 
-| type | 외부 API 도구 | 구조화 데이터 전달 도구 | Spring Boot 후처리 |
-|------|-------------|----------------------|------------------|
-| `itinerary` | search_place, search_web, get_weather 등 | `submit_itinerary(day_plans)` | dayPlans로 DB 일정 교체 |
-| `change` | **없음** | `submit_change(startDate, budget, ...)` | change 값으로 DB 직접 업데이트 |
-| `reservation` | search_flights / search_hotels + 예약 API | `submit_reservation(...)` | reservations 테이블 저장 |
-| `cancel` | 취소 API | `submit_cancel(reservationId, cancelledAt)` | reservations.status = "cancelled" |
-| `chat` | search_web, get_weather 등 (필요 시) | 호출 없음 | 추가 처리 없음 |
+| type | 외부 API 도구 | 구조화 출력 필드 | Spring Boot 후처리 |
+|------|-------------|----------------|------------------|
+| `itinerary` | search_place, search_web, get_weather, find_route 등 | `day_plans` | dayPlans로 DB 일정 교체 |
+| `change` | **없음** | `change` | change 값으로 DB 직접 업데이트 |
+| `reservation` | search_flights / search_hotels + 예약 API | `reservation` | reservations 테이블 저장 |
+| `cancel` | 취소 API | `cancel` | reservations.status = "cancelled" |
+| `chat` | search_web, get_weather 등 (필요 시) | — | 추가 처리 없음 |
 
-모든 type에서 사용자 취향·요약 정보가 감지되면 `update_memory(ai_summary, preferences)`를 호출합니다.
+모든 type에서 사용자 취향·요약 정보가 감지되면 OrchestratorResult의 `ai_summary`, `preferences` 필드에 값을 채워 반환합니다 (별도 도구 호출 없음).
 
 ### 3-3. 도구 호출 및 스트리밍
 
@@ -223,11 +223,12 @@ class ResponseClassification(BaseModel):
 | done 필드 | 출처 |
 |-----------|------|
 | `type` | classification_agent |
-| `itinerary.dayPlans` | orchestrator → `submit_itinerary` 도구 캡처 |
-| `change.*` | orchestrator → `submit_change` 도구 캡처 |
-| `reservation` | orchestrator → `submit_reservation` 도구 캡처 |
-| `cancel.*` | orchestrator → `submit_cancel` 도구 캡처 |
-| `memory` | orchestrator → `update_memory` 도구 캡처 (`None`이면 `done.memory = null`) |
+| `itinerary.dayPlans` | OrchestratorResult.day_plans |
+| `change.*` | OrchestratorResult.change |
+| `reservation` | OrchestratorResult.reservation |
+| `cancel.*` | OrchestratorResult.cancel |
+| `memory.aiSummary` | OrchestratorResult.ai_summary (이전 ai_summary + 현재 대화 합산 전체 재요약). `None`이면 `done.memory = null` |
+| `memory.preferences` | OrchestratorResult.preferences (이전 preferences 포함 전체 누적 dict). `None`이면 `done.memory = null` |
 | `userMessage.embedding` | 요청 시작 시 생성 |
 | `assistantMessage.embedding` | 스트리밍 완료 후 생성 |
 
@@ -252,30 +253,36 @@ POST /api/v1/ai-messages (Spring Boot 요청)
   ↓
 [0] X-Internal-Token 검증
   ↓
-[1] memory 동기화 (Redis)
+[1] DB에서 컨텍스트 직접 로드 (매 요청마다)
+    - chat_rooms: ai_summary, preferences
+    - chat_messages: 최근 20개 대화 이력
+    - itineraries: 현재 여행 일정 (roomId 기준, 없으면 None)
+    → 로드 직후 Redis memory 동기화 (fire-and-forget)
   ↓
 [2] 사용자 메시지 임베딩 생성 → pgvector 유사 메시지 검색 (상위 5개)
   ↓
-[3] chat_history 로드 (Redis) + 현재 일정 로드 (DB, roomId 기준) + 컨텍스트 구성
+[3] OrchestratorDeps 구성 (ai_summary·preferences·history·similar_messages·current_itinerary·request_type)
   ↓
 [4] classification_agent.run(user_message) → type 판별
     (빠름. orchestrator 전에 완료하여 request_type으로 전달)
   ↓
-[5] orchestrator_agent.run_stream(user_message, deps={..., request_type})
-  ├─ type에 맞는 외부 API 도구 호출
-  ├─ 구조화 데이터 전달 도구 호출 (submit_itinerary / submit_change / submit_reservation / submit_cancel)
-  ├─ 필요시 update_memory(ai_summary, preferences) 호출
-  └─ 텍스트 토큰 → event: chunk 반복 전송
+[5] type == "itinerary" → run_itinerary_pipeline (4단계 파이프라인)
+    type 그 외 → orchestrator_agent.run(user_message, deps, history)
+    ├─ type에 맞는 외부 API 도구 호출
+    └─ OrchestratorResult 구조화 출력 반환
   ↓
-[6] 스트리밍 완료 → 도구 캡처 결과 확보
+[6] chunk 이벤트 전송 (full_response 한 번에)
   ↓
-[7] AI 응답 임베딩 생성
+[7] day_plans cost.amount_krw 자동 환산 (KRW 이외 통화만)
   ↓
-[8] update_memory 캡처 결과 → Redis 업데이트 (캡처된 경우에만)
+[8] AI 응답 임베딩 생성
   ↓
-[9] chat_history 저장 (Redis, 최대 20개)
+[9] merged_summary / merged_prefs 계산
+    (OrchestratorResult에 값이 있으면 사용, 없으면 ctx 값 유지)
+    → ai_summary 또는 preferences 변경 시 Redis memory 업데이트
   ↓
-[10] done 페이로드 구성 (type + 캡처 결과 조합) → event: done 전송
+[10] done 페이로드 구성 → event: done 전송
+     memory 필드: OrchestratorResult에 변경이 있을 때만 포함 (없으면 null)
 ```
 
 SSE 이벤트 포맷 및 `done` 페이로드 상세 구조는 **[docs/api/POST_v1_ai-messages.md](api/POST_v1_ai-messages.md)** 참조.
@@ -284,37 +291,49 @@ SSE 이벤트 포맷 및 `done` 페이로드 상세 구조는 **[docs/api/POST_v
 
 ## 8. 메모리 아키텍처
 
-AI 에이전트는 Redis를 단일 메모리 저장소로 사용하고, 영속성은 `chat_rooms` 테이블(Java 관리)이 담당합니다.
+AI 에이전트는 **DB(PostgreSQL)를 진실의 원천(source of truth)**으로 사용하고, Redis는 요청 시작 시 DB 값을 동기화해두는 보조 저장소입니다. 영속성은 `chat_rooms` 테이블(Java 관리)이 담당합니다.
 
 ### 8-1. Redis 저장 구조
 
 | Redis 키 | 타입 | 내용 |
 |----------|------|------|
 | `memory:{chat_room_id}` | JSON | `ai_summary`(text) + `preferences`(json) + `loaded_at`(ISO 8601) |
-| `chat_history:{chat_room_id}` | bytes (JSON) | 최근 **20개** 메시지 — 초과 시 오래된 것부터 제거 |
+| `chat_history:{chat_room_id}` | bytes (JSON) | 최근 **20개** 메시지 mirror (DB chat_messages 기반) |
 
 `memory` 키 구조:
 ```json
 {
-  "ai_summary": "지금까지의 대화 전체 요약본",
-  "preferences": { "preference_food": "noodle" },
+  "ai_summary": "지금까지의 대화 전체 누적 요약",
+  "preferences": { "food": "noodle", "transport": "transit" },
   "loaded_at": "2026-04-10T12:00:00Z"
 }
 ```
 
-### 8-2. memory 갱신 흐름
+### 8-2. memory 갱신 전체 흐름
 
 ```
-done 이벤트 전송 시점
+[요청 시작]
+  DB chat_rooms에서 ai_summary / preferences 직접 조회
+  → Redis memory 덮어쓰기 (fire-and-forget)
+  → OrchestratorDeps에 주입
+
+[AI 처리]
+  OrchestratorResult.ai_summary / preferences 값이 있으면
+  → LLM이 이전 ai_summary + 현재 대화를 합산하여 전체 재요약 작성
+  → LLM이 이전 preferences에 신규 항목을 추가/수정한 전체 dict 작성
+
+[응답 후]
+  merged_summary = 새 ai_summary (있으면) else DB에서 읽은 기존 값
+  merged_prefs   = 새 preferences (있으면) else DB에서 읽은 기존 값
   ↓
-classification_agent 결과에 ai_summary / preferences 포함?
-  ├─ 없음 → done.memory = null, Redis memory 유지
-  └─ 있음 → Redis memory 업데이트 → done.memory에 포함
-               ↓
-             Spring Boot가 chat_rooms.ai_summary / preferences 갱신
+  변경 있음 → Redis memory 업데이트
+             done.memory = { aiSummary: merged_summary, preferences: merged_prefs }
+             → Java(Spring Boot)가 chat_rooms.ai_summary / preferences 갱신
+  변경 없음 → Redis memory 유지
+             done.memory = null
 ```
 
-`memory` 갱신은 `type`과 무관합니다. `"chat"` 타입에서도 사용자 취향 정보가 감지되면 갱신됩니다.
+`memory` 갱신은 `type`과 무관합니다. `"chat"` 타입에서도 새 취향이 감지되면 갱신됩니다.
 
 ---
 
