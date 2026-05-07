@@ -35,6 +35,19 @@ def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\n{data_block}\n\n"
 
 
+def _exclude_none(obj, keep_null_keys: frozenset[str] = frozenset()) -> object:
+    """None 값을 재귀적으로 제거하되, keep_null_keys에 포함된 키는 None이어도 유지한다."""
+    if isinstance(obj, dict):
+        return {
+            k: _exclude_none(v, keep_null_keys)
+            for k, v in obj.items()
+            if v is not None or k in keep_null_keys
+        }
+    if isinstance(obj, list):
+        return [_exclude_none(item, keep_null_keys) for item in obj]
+    return obj
+
+
 _SSE_EXAMPLE = (
     "event: chunk\n"
     'data: {"content": "날씨가 맑고 여행하기 좋은 날씨입니다!"}\n\n'
@@ -190,7 +203,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     if hide_embedding:
         done.userMessage.embedding = None
         done.assistantMessage.embedding = None
-    yield _sse("done", done.model_dump(exclude_none=True))
+    yield _sse("done", _exclude_none(done.model_dump(), keep_null_keys=frozenset({"amount_krw"})))
 
 
 def _build_done_event(
