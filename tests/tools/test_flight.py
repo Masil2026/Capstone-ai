@@ -15,7 +15,8 @@ def _print_flight_results(test_name, result):
         for i, flight in enumerate(result.get("data", []), 1):
             stop_text = "Direct" if flight['stops'] == 0 else f"{flight['stops']} Stop"
             route = f"{flight['origin']}->{flight['destination']}"
-            print(f"{i:<3} | {flight['airline']:<18} | {route:<11} | {flight['total_amount']:<12} | {stop_text:<7} | {flight['departing_at']}")
+            price_str = f"{flight['currency']} {flight['price_original']} ({flight.get('price_krw', '?'):,}원)"
+            print(f"{i:<3} | {flight['airline']:<18} | {route:<11} | {price_str:<28} | {stop_text:<7} | {flight['departing_at']}")
     
     print("="*85 + "\n")
 

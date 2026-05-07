@@ -282,26 +282,25 @@ def test_historical_weather_osaka():
 
 @pytest.mark.asyncio
 async def test_adapter_get_weather_hourly():
-    """어댑터 hourly 예보 — 4일 이내 케이스 반환값 구조 확인"""
+    """어댑터 단기 예보 (4일 이내) — hourly 집계 후 daily 포맷으로 반환"""
     adapter = WeatherAdapter()
     result = await adapter.execute("get_weather", {
         "city": "Seoul",
         "forecast_days": 3,
     })
 
-    print("\n[어댑터 hourly 예보 - 정제된 결과]")
+    print("\n[어댑터 단기 예보 - 정제된 결과]")
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
     assert result["status"] == "success"
-    assert result["forecast_type"] == "hourly"
+    assert result["forecast_type"] == "daily"   # hourly 집계 후 daily 포맷 반환
     assert result["count"] > 0
     item = result["data"][0]
-    assert "time" in item
-    assert "temperature" in item
-    assert "apparent_temperature" in item
-    assert "precipitation_probability" in item
+    assert "date" in item
+    assert "temperature_max" in item
+    assert "temperature_min" in item
+    assert "precipitation_probability_max" in item
     assert "weather" in item
-    assert "windspeed" in item
 
 
 @pytest.mark.asyncio
