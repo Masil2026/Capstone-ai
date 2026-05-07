@@ -32,6 +32,24 @@ async def save_history(room_id: str, messages: list[ModelMessage]) -> None:
     )
 
 
+async def save_raw_history(room_id: str, messages: list[dict]) -> None:
+    """DB에서 읽은 raw 히스토리(role+content)를 단순 JSON으로 Redis에 저장 (테스트용). 없으면 빈 배열."""
+    await _redis.set(
+        f"chatroom_history:{room_id}",
+        json.dumps(messages, ensure_ascii=False),
+    )
+    print(f"[save_raw_history] chatroom_history:{room_id} → {len(messages)}건 저장", flush=True)
+
+
+async def save_pg_history(room_id: str, messages: list[dict]) -> None:
+    """pgvector 유사도 검색으로 찾은 메시지(role+content)를 Redis에 저장 (테스트용). 없으면 빈 배열."""
+    await _redis.set(
+        f"pgchatroom_history:{room_id}",
+        json.dumps(messages, ensure_ascii=False),
+    )
+    print(f"[save_pg_history] pgchatroom_history:{room_id} → {len(messages)}건 저장", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # 장기 메모리 (memory:{room_id})
 # 구조: {"ai_summary": str | null, "preferences": dict | null}

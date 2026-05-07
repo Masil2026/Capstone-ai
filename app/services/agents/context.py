@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from .memory import save_memory, save_history
+from .memory import save_memory, save_raw_history, save_pg_history
 
 _openai_client = AsyncOpenAI(api_key=settings.GPT_API_KEY)
 _EMBEDDING_MODEL = "text-embedding-3-small"
@@ -39,8 +39,8 @@ async def get_user_embedding(text_input: str) -> list[float]:
 # DB 조회 (동기 — run_in_executor에서 실행)
 # ---------------------------------------------------------------------------
 
-def _query_recent_history(room_id: str) -> list:
-    """chat_messages에서 최근 20개 조회 → pydantic-ai ModelMessage 리스트로 변환"""
+def _query_recent_history(room_id: str) -> tuple[list, list[dict]]:
+    """chat_messages에서 최근 20개 조회 → (ModelMessage 리스트, raw dict 리스트) 반환"""
     with SessionLocal() as db:
         rows = db.execute(
             text(
@@ -52,9 +52,11 @@ def _query_recent_history(room_id: str) -> list:
         ).fetchall()
         rows = list(rows)  # Row 데이터를 세션 종료 전에 Python 객체로 완전히 복사
 
+    raw_simple: list[dict] = []
     raw = []
     for row in reversed(rows):  # 오래된 순으로
         ts = row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at)
+        raw_simple.append({"role": row.role, "content": row.content})
         if row.role == "user":
             raw.append({
                 "kind": "request",
@@ -68,11 +70,11 @@ def _query_recent_history(room_id: str) -> list:
                 "timestamp": ts,
             })
     if not raw:
-        return []
+        return [], raw_simple
     try:
-        return ModelMessagesTypeAdapter.validate_json(_json.dumps(raw))
+        return ModelMessagesTypeAdapter.validate_json(_json.dumps(raw)), raw_simple
     except Exception:
-        return []
+        return [], raw_simple
 
 
 def _query_similar_messages(room_id: str, embedding: list[float]) -> list[dict]:
@@ -196,6 +198,8 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     except Exception:
         similar_messages = []
 
+    asyncio.ensure_future(save_pg_history(room_id, similar_messages))
+
     try:
         current_itinerary = await itinerary_fut
     except Exception:
@@ -203,14 +207,14 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
         current_itinerary = None
 
     try:
-        history = await history_fut
+        history, raw_history = await history_fut
     except Exception:
         _log.error("history 로드 실패", exc_info=True)
         history = []
+        raw_history = []
 
-    # DB에서 읽은 히스토리를 Redis에 mirror (비동기 fire-and-forget)
-    if history:
-        asyncio.ensure_future(save_history(room_id, history))
+    # DB에서 읽은 히스토리를 Redis에 저장 (비동기 fire-and-forget)
+    asyncio.ensure_future(save_raw_history(room_id, raw_history))
 
     print(
         f"\n[load_context] DB 조회 결과"
