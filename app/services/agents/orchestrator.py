@@ -41,6 +41,20 @@ orchestrator_agent = Agent(
 # ---------------------------------------------------------------------------
 
 _TYPE_INSTRUCTIONS: dict[str, str] = {
+    "itinerary": """\
+## 이번 요청: 여행 일정 생성/수정 (itinerary)
+
+**[응답 형식 — 반드시 준수]**
+반환 JSON의 필드를 아래와 같이 채워야 한다:
+- `day_plans`: 날짜별 일정 (키='YYYY-MM-DD'). 모든 날짜 필수.
+- `message`: 일정 핵심 포인트 소개 (내용 재나열 금지, 2~3문장)
+- `ai_summary`: 한 문장 요약. 예) "도쿄 3박4일 일정 생성. 성인 2명."
+
+처리:
+1. current_itinerary(여행 기본 정보)를 반드시 참고한다.
+2. get_weather, search_web, search_place, find_route 도구를 순서대로 활용해 일정을 구성한다.
+3. 기존 day_plans가 있으면 사용자 요청에 따라 해당 부분만 수정하고 나머지는 유지한다.""",
+
     "change": """\
 ## 이번 요청: 여행 기본 정보 변경 (change)
 

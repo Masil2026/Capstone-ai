@@ -137,6 +137,14 @@ async def _planner_prompt(ctx: RunContext[PlannerDeps]) -> str:
         "  예) 'Senso-ji Temple Asakusa Tokyo', 'tonkotsu ramen Shinjuku Tokyo lunch'",
     ]
 
+    existing_plans = info.get("day_plans")
+    if existing_plans:
+        lines += ["", "## 기존 일정 (수정 요청이면 이 일정을 기준으로 변경할 것)"]
+        for date_key, items in existing_plans.items():
+            lines.append(f"### {date_key}")
+            for item in items:
+                lines.append(f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})")
+
     if d.preferences:
         lines += ["", "## 사용자 취향", json.dumps(d.preferences, ensure_ascii=False, indent=2)]
     if d.ai_summary:
@@ -248,6 +256,14 @@ async def _synthesizer_prompt(ctx: RunContext[SynthesizerDeps]) -> str:
         "- 무료: cost=null",
     ]
 
+    existing_plans = info.get("day_plans")
+    if existing_plans:
+        lines += ["", "## 기존 일정 (수정 요청이면 이 일정을 기준으로 변경할 것)"]
+        for date_key, items in existing_plans.items():
+            lines.append(f"### {date_key}")
+            for item in items:
+                lines.append(f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})")
+
     lines += ["", "## 선택된 항공편"]
     for fl in po.selected_flights:
         lines.append(
@@ -325,8 +341,11 @@ async def _fetch_web_summary(destination: str, preferences: dict | None) -> str:
     if not snippets:
         return f"{destination} 여행 정보를 찾지 못했습니다."
     combined = "\n\n".join(snippets[:10])
+    pref_hint = ""
+    if preferences:
+        pref_hint = f"\n\n사용자 취향: {json.dumps(preferences, ensure_ascii=False)}\n위 취향에 맞는 정보를 우선적으로 포함해줘."
     result = await preprocessor_agent.run(
-        f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.\n\n{combined}"
+        f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.{pref_hint}\n\n{combined}"
     )
     return result.data
 
@@ -531,7 +550,7 @@ async def run_itinerary_pipeline(
         similar_messages=deps.similar_messages,
     )
     synth_result = await synthesizer_agent.run(
-        f"{destination} {itinerary.get('total_days', '')}일 여행 일정을 완성해줘.",
+        user_message,
         deps=synth_deps,
         message_history=history,
     )
