@@ -78,7 +78,7 @@ class MessageWithEmbedding(BaseModel):
 
 class MemoryOutput(BaseModel):
     aiSummary: str | None = None
-    preferences: dict[str, Any] | None = None
+    preferences: dict[str, Any] = {}
 
 
 class ItineraryPayload(BaseModel):

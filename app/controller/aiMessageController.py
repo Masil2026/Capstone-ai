@@ -171,8 +171,9 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
 
     # [8] memory 갱신 — Redis에만 저장, DB는 Java 백엔드가 done 이벤트의 memory 필드를 보고 씀
     merged_summary = orch_result.ai_summary if orch_result.ai_summary is not None else ctx["ai_summary"]
-    merged_prefs = orch_result.preferences if orch_result.preferences is not None else ctx["preferences"]
-    if orch_result.ai_summary is not None or orch_result.preferences is not None:
+    # preferences: 빈 dict {}는 "변화 없음"으로 처리 → 기존 값 유지
+    merged_prefs = orch_result.preferences if orch_result.preferences else ctx["preferences"]
+    if orch_result.ai_summary is not None or orch_result.preferences:
         await save_memory(room_id, merged_summary, merged_prefs)
 
     # [9] done 이벤트 전송
@@ -203,10 +204,10 @@ def _build_done_event(
     merged_prefs: dict | None,
 ) -> DoneEvent:
     memory_output = None
-    if orch_result.ai_summary is not None or orch_result.preferences is not None:
+    if orch_result.ai_summary is not None or orch_result.preferences:
         memory_output = MemoryOutput(
             aiSummary=merged_summary,
-            preferences=merged_prefs,
+            preferences=merged_prefs or {},
         )
 
     itinerary = None
