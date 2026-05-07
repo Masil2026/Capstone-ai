@@ -212,6 +212,17 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     if history:
         asyncio.ensure_future(save_history(room_id, history))
 
+    print(
+        f"\n[load_context] DB 조회 결과"
+        f"\n  room_id          : {room_id}"
+        f"\n  ai_summary       : {db_memory['ai_summary']}"
+        f"\n  preferences      : {db_memory['preferences']}"
+        f"\n  history          : {len(history)}건"
+        f"\n  similar_messages : {len(similar_messages)}건"
+        f"\n  current_itinerary: {({k: v for k, v in current_itinerary.items() if k != 'day_plans'} if current_itinerary else None)}",
+        flush=True,
+    )
+
     return {
         "user_embedding": user_embedding,
         "history": history,

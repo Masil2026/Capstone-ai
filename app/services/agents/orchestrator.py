@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent
+
+_log = logging.getLogger(__name__)
 
 from app.schemas.ai_message import OrchestratorResult
 from app.services.adapters.tavily_search import TavilySearchAdapter
@@ -34,6 +37,10 @@ orchestrator_agent = Agent(
     model=_build_model("orchestrator"),
     deps_type=OrchestratorDeps,
     result_type=OrchestratorResult,
+    system_prompt=(
+        "당신은 여행 계획 전문 AI 어시스턴트입니다.\n"
+        "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다."
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -101,9 +108,16 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 ## 이번 요청: 일반 대화/질문 (chat)
 
 **[응답 형식]**
-- `message`: 친절하고 유익한 텍스트 응답
+- `message`: 반드시 실제 내용을 담은 텍스트 응답. "확인해드릴게요" 같은 안내 문구만 쓰고 끝내지 말 것.
 - day_plans·change·reservation·cancel 필드는 null로 둔다.
-- 질문 내용에 따라 search_web, get_weather 등 도구를 활용한다.""",
+
+**[일정 관련 질문]**
+- 여행 날짜·목적지·인원·예산 등 기본 정보를 묻는 질문이면 `## 현재 여행 일정` 섹션의 데이터를 그대로 읽어 구체적으로 답한다.
+- 이미 주입된 컨텍스트로 답할 수 있으면 외부 API 도구를 호출하지 않는다.
+- 현재 일정이 없으면(current_itinerary = null) 없다고 명확히 안내한다.
+
+**[그 외 질문]**
+- 필요 시 search_web, get_weather 등 도구를 활용한다.""",
 }
 
 _MEMORY_INSTRUCTION = """\
@@ -117,36 +131,56 @@ _MEMORY_INSTRUCTION = """\
 - chat·reservation·cancel에서 변화 없으면 ai_summary·preferences는 null로 둔다."""
 
 
-@orchestrator_agent.system_prompt
-async def build_system_prompt(ctx: RunContext[OrchestratorDeps]) -> str:
-    deps = ctx.deps
-    sections: list[str] = []
-
-    sections.append(
-        "당신은 여행 계획 전문 AI 어시스턴트입니다.\n"
-        "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다."
+def build_context_prompt(deps: OrchestratorDeps) -> str:
+    """OrchestratorDeps를 읽어 컨텍스트 블록 문자열을 반환한다.
+    orchestrator_agent.run() 호출 전에 user_message 앞에 붙인다.
+    """
+    print(
+        f"\n[orchestrator_agent] build_context_prompt 호출\n"
+        f"  request_type     : {deps.request_type}\n"
+        f"  today            : {deps.today}\n"
+        f"  ai_summary       : {deps.ai_summary}\n"
+        f"  preferences      : {deps.preferences}\n"
+        f"  similar_messages : {len(deps.similar_messages)}건\n"
+        f"  current_itinerary: "
+        f"{({k: v for k, v in deps.current_itinerary.items() if k != 'day_plans'} if deps.current_itinerary else None)}",
+        flush=True,
     )
+    sections: list[str] = []
     sections.append(f"오늘 날짜: {deps.today}")
-    sections.append(_TYPE_INSTRUCTIONS.get(deps.request_type, _TYPE_INSTRUCTIONS["chat"]))
-    sections.append(_MEMORY_INSTRUCTION)
+
+    if deps.current_itinerary:
+        it = deps.current_itinerary
+        child_ages = it.get("child_ages") or []
+        child_str = f"{it.get('child_count')}명 (나이: {child_ages})" if it.get("child_count") else "없음"
+        budget = it.get("budget")
+        budget_str = f"{int(budget):,}원" if budget else "미설정"
+        day_plans = it.get("day_plans")
+        day_plans_str = f"{len(day_plans)}일치 일정 존재" if day_plans else "아직 없음"
+        sections.append(
+            "## 현재 여행 기본 정보 (DB에서 조회된 실제 값 — 반드시 이 데이터를 기준으로 답변할 것)\n"
+            f"- 여행지: {it.get('destination')}\n"
+            f"- 여행 기간: {it.get('start_date')} ~ {it.get('end_date')} ({it.get('total_days')}일)\n"
+            f"- 예산: {budget_str}\n"
+            f"- 성인: {it.get('adult_count')}명\n"
+            f"- 어린이: {child_str}\n"
+            f"- day_plans: {day_plans_str}"
+        )
+    else:
+        sections.append("## 현재 여행 기본 정보\n아직 여행 일정이 등록되지 않았습니다.")
 
     if deps.ai_summary:
         sections.append(f"## 이전 대화 요약\n{deps.ai_summary}")
 
     if deps.preferences:
-        sections.append(
-            f"## 사용자 취향\n{json.dumps(deps.preferences, ensure_ascii=False, indent=2)}"
-        )
-
-    if deps.current_itinerary:
-        sections.append(
-            f"## 현재 여행 일정\n"
-            f"{json.dumps(deps.current_itinerary, ensure_ascii=False, indent=2)}"
-        )
+        sections.append(f"## 사용자 취향\n{json.dumps(deps.preferences, ensure_ascii=False, indent=2)}")
 
     if deps.similar_messages:
         msgs = "\n".join(f"[{m['role']}] {m['content']}" for m in deps.similar_messages)
         sections.append(f"## 참고할 과거 대화\n{msgs}")
+
+    sections.append(_TYPE_INSTRUCTIONS.get(deps.request_type, _TYPE_INSTRUCTIONS["chat"]))
+    sections.append(_MEMORY_INSTRUCTION)
 
     return "\n\n".join(sections)
 

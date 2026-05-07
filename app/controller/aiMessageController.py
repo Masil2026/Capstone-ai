@@ -23,7 +23,7 @@ from app.services.agents.classification import classification_agent
 from app.services.agents.context import get_user_embedding, load_context
 from app.services.agents.itinerary_pipeline import run_itinerary_pipeline
 from app.services.agents.memory import save_memory
-from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agent
+from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agent, build_context_prompt
 
 router = APIRouter()
 
@@ -107,25 +107,46 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         current_itinerary=ctx["current_itinerary"],
         request_type=request_type,
     )
+    print(
+        f"\n[_stream] OrchestratorDeps 조립 완료"
+        f"\n  request_type     : {request_type}"
+        f"\n  ai_summary       : {deps.ai_summary}"
+        f"\n  preferences      : {deps.preferences}"
+        f"\n  similar_messages : {len(deps.similar_messages)}건"
+        f"\n  current_itinerary: {({k: v for k, v in deps.current_itinerary.items() if k != 'day_plans'} if deps.current_itinerary else None)}",
+        flush=True,
+    )
     # [4] 에이전트 실행 — itinerary는 파이프라인, 그 외는 오케스트레이터
+    print(f"\n[_stream] [4] 에이전트 실행 시작. request_type={request_type}", flush=True)
     try:
+        context_block = build_context_prompt(deps)
+
         if request_type == "itinerary":
+            print("[_stream] run_itinerary_pipeline 호출", flush=True)
             orch_result = await run_itinerary_pipeline(deps, user_message, ctx["history"])
             if orch_result is None:
-                # current_itinerary 없음 → 오케스트레이터 폴백
+                print("[_stream] pipeline None → orchestrator 폴백", flush=True)
                 run_result = await orchestrator_agent.run(
-                    user_message, deps=deps, message_history=ctx["history"],
+                    f"{context_block}\n\n---\n\n사용자 메시지: {user_message}",
+                    deps=deps,
+                    message_history=ctx["history"],
                 )
                 orch_result = run_result.data
         else:
+            print("[_stream] orchestrator_agent.run() 호출", flush=True)
             run_result = await orchestrator_agent.run(
-                user_message, deps=deps, message_history=ctx["history"],
+                f"{context_block}\n\n---\n\n사용자 메시지: {user_message}",
+                deps=deps,
+                message_history=ctx["history"],
             )
+            print(f"[_stream] orchestrator_agent.run() 완료. message={run_result.data.message[:80]!r}", flush=True)
             orch_result = run_result.data
 
         full_response: str = orch_result.message
 
     except Exception as e:
+        import traceback
+        print(f"[_stream] 에이전트 오류: {e}\n{traceback.format_exc()}", flush=True)
         yield _sse("error", {"message": f"에이전트 오류: {e}"})
         return
 

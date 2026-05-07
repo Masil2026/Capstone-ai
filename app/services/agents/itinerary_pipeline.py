@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 
+_log = logging.getLogger(__name__)
+
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent
 
 from app.schemas.ai_message import OrchestratorResult
 from app.services.adapters.accommodation_api import AccommodationAdapter
@@ -96,13 +99,25 @@ planner_agent = Agent(
     model=_build_model("orchestrator"),
     deps_type=PlannerDeps,
     result_type=PlannerOutput,
+    system_prompt="당신은 여행 일정 플래너입니다. 제공된 데이터를 바탕으로 PlannerOutput JSON을 반환하라.",
 )
 
 
-@planner_agent.system_prompt
-async def _planner_prompt(ctx: RunContext[PlannerDeps]) -> str:
-    d = ctx.deps
+def _build_planner_prompt(d: PlannerDeps) -> str:
     info = d.itinerary_info
+    print(
+        f"\n[planner_agent] _build_planner_prompt 호출\n"
+        f"  destination={info.get('destination')}, start={info.get('start_date')}, end={info.get('end_date')}\n"
+        f"  budget={info.get('budget')}, adults={info.get('adult_count')}, children={info.get('child_count')}\n"
+        f"  ai_summary       : {d.ai_summary}\n"
+        f"  preferences      : {d.preferences}\n"
+        f"  similar_messages : {len(d.similar_messages)}건\n"
+        f"  weather          : {len(d.weather)}건\n"
+        f"  flights_depart   : status={d.flights_depart.get('status')}\n"
+        f"  flights_return   : status={d.flights_return.get('status')}\n"
+        f"  hotels           : status={d.hotels.get('status')}",
+        flush=True,
+    )
     dest = info.get("destination", "여행지")
     start = info.get("start_date", "")
     end = info.get("end_date", "")
@@ -218,14 +233,26 @@ synthesizer_agent = Agent(
     model=_build_model("orchestrator"),
     deps_type=SynthesizerDeps,
     result_type=OrchestratorResult,
+    system_prompt="당신은 여행 일정 완성 전문가입니다. 제공된 데이터를 바탕으로 OrchestratorResult JSON을 반환하라.",
 )
 
 
-@synthesizer_agent.system_prompt
-async def _synthesizer_prompt(ctx: RunContext[SynthesizerDeps]) -> str:
-    d = ctx.deps
+def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
     info = d.itinerary_info
     po = d.planner_output
+    print(
+        f"\n[synthesizer_agent] _build_synthesizer_prompt 호출\n"
+        f"  destination={info.get('destination')}, start={info.get('start_date')}, end={info.get('end_date')}\n"
+        f"  budget={info.get('budget')}, adults={info.get('adult_count')}\n"
+        f"  ai_summary       : {d.ai_summary}\n"
+        f"  preferences      : {d.preferences}\n"
+        f"  similar_messages : {len(d.similar_messages)}건\n"
+        f"  planner_output   : days={len(po.days)}일, flights={len(po.selected_flights)}편, hotels={len(po.selected_hotels)}개\n"
+        f"  place_results    : {len(d.place_results)}건\n"
+        f"  route_results    : {len(d.route_results)}건\n"
+        f"  existing_day_plans: {list(info['day_plans'].keys()) if info.get('day_plans') else None}",
+        flush=True,
+    )
     dest = info.get("destination", "여행지")
     budget = info.get("budget")
     adults = info.get("adult_count", 1)
@@ -529,8 +556,20 @@ async def run_itinerary_pipeline(
         today=deps.today,
         similar_messages=deps.similar_messages,
     )
+    print(
+        f"\n[run_itinerary_pipeline] PlannerDeps 조립 완료"
+        f"\n  destination={itinerary.get('destination')}, start={itinerary.get('start_date')}, end={itinerary.get('end_date')}"
+        f"\n  ai_summary  : {deps.ai_summary}"
+        f"\n  preferences : {deps.preferences}"
+        f"\n  weather     : {len(weather)}건"
+        f"\n  flights_depart status={flights_depart.get('status')}"
+        f"\n  flights_return status={flights_return.get('status')}"
+        f"\n  hotels status={hotels.get('status')}",
+        flush=True,
+    )
+    planner_context = _build_planner_prompt(planner_deps)
     planner_result = await planner_agent.run(
-        user_message,
+        f"{planner_context}\n\n---\n\n사용자 메시지: {user_message}",
         deps=planner_deps,
         message_history=history,
     )
@@ -553,8 +592,21 @@ async def run_itinerary_pipeline(
         today=deps.today,
         similar_messages=deps.similar_messages,
     )
+    print(
+        f"\n[run_itinerary_pipeline] SynthesizerDeps 조립 완료"
+        f"\n  destination={itinerary.get('destination')}, start={itinerary.get('start_date')}, end={itinerary.get('end_date')}"
+        f"\n  ai_summary    : {deps.ai_summary}"
+        f"\n  preferences   : {deps.preferences}"
+        f"\n  planner days  : {len(planner_output.days)}일"
+        f"\n  flights       : {len(planner_output.selected_flights)}편"
+        f"\n  hotels        : {len(planner_output.selected_hotels)}개"
+        f"\n  place_results : {len(place_results)}건"
+        f"\n  route_results : {len(route_results)}건",
+        flush=True,
+    )
+    synth_context = _build_synthesizer_prompt(synth_deps)
     synth_result = await synthesizer_agent.run(
-        user_message,
+        f"{synth_context}\n\n---\n\n사용자 메시지: {user_message}",
         deps=synth_deps,
         message_history=history,
     )

@@ -1,7 +1,17 @@
+import logging
+import sys
+
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from app.controller.TestController import router as test_router
 from app.controller.aiMessageController import router as ai_message_router
+
+_app_logger = logging.getLogger("app")
+_app_logger.setLevel(logging.INFO)
+if not _app_logger.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s"))
+    _app_logger.addHandler(_h)
 
 app = FastAPI(
     title="MJU Capstone AI AGENTI",
