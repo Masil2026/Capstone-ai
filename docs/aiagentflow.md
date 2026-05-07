@@ -106,26 +106,50 @@ orchestrator가 응답 생성 시 활용하는 컨텍스트:
 
 ## 3. 스트리밍 응답 생성 — Orchestrator (GPT-4.1)
 
-### 3-1. 동적 시스템 프롬프트 (OrchestratorDeps)
+### 3-1. 동적 컨텍스트 주입 (OrchestratorDeps)
 
-오케스트레이터는 매 요청마다 Redis + pgvector에서 로드한 컨텍스트를 시스템 프롬프트에 주입합니다.
+오케스트레이터는 매 요청마다 DB + pgvector에서 로드한 컨텍스트를 **user_message 앞에 직접 붙여** LLM에 전달합니다.
 
 ```python
 @dataclass
 class OrchestratorDeps:
-    ai_summary: str | None                      # 이전 대화 전체 요약 (Redis memory)
-    preferences: dict | None                    # 사용자 취향 JSON (Redis memory)
+    ai_summary: str | None                      # 이전 대화 전체 요약 (DB chat_rooms)
+    preferences: dict | None                    # 사용자 취향 JSON (DB chat_rooms)
     today: str                                  # YYYY-MM-DD — 날짜 계산 기준
     similar_messages: list[dict]                # pgvector 유사 과거 메시지 (최대 5개)
                                                 # [{"role": "user"|"assistant", "content": "..."}]
-    current_itinerary: dict | None              # 현재 여행 일정 dayPlans (DB read-only)
-                                                # {"YYYY-MM-DD": [{"plan_name", "time", "place", "note"}]}
+    current_itinerary: dict | None              # 현재 여행 일정 전체 (DB itineraries, read-only)
+                                                # {"destination", "start_date", "end_date", "budget", ...}
                                                 # 일정 없으면 None
+    request_type: str                           # classification_agent 판별 결과
 ```
 
-`@orchestrator_agent.system_prompt` 함수가 위 값을 읽어 자연어 프롬프트로 조합합니다.
-`similar_messages`는 "참고할 수 있는 과거 대화" 형태로 시스템 프롬프트에 삽입됩니다.
-`current_itinerary`는 일정 수정 시 기존 일정 맥락으로 주입됩니다. `None`이면 신규 생성으로 처리합니다.
+`build_context_prompt(deps)` 함수가 위 값을 읽어 컨텍스트 블록 문자열을 생성하고, `orchestrator_agent.run()` 직전에 user_message 앞에 붙입니다.
+
+```python
+context_block = build_context_prompt(deps)
+run_result = await orchestrator_agent.run(
+    f"{context_block}\n\n---\n\n사용자 메시지: {user_message}",
+    deps=deps,
+    message_history=ctx["history"],
+)
+```
+
+> **왜 `@agent.system_prompt` 데코레이터를 쓰지 않는가?**
+> pydantic-ai 0.0.54에서 `@agent.system_prompt`에 `RunContext`를 받는 함수를 등록하면,
+> `async def`든 `def`든 실제 `agent.run()` 시점에 **조용히 호출되지 않는** 버그가 있습니다.
+> 오류도 없고 예외도 없이 시스템 프롬프트 함수가 무시되어 LLM이 컨텍스트 없이 응답합니다.
+> 이 버그를 우회하기 위해 컨텍스트를 user_message에 직접 주입하는 패턴을 사용합니다.
+
+컨텍스트 블록 구성 순서 (위에서 아래로):
+1. 오늘 날짜
+2. `## 현재 여행 기본 정보` (current_itinerary가 있으면 실제 값, 없으면 "등록 안 됨" 명시)
+3. `## 이전 대화 요약` (ai_summary가 있을 때만)
+4. `## 사용자 취향` (preferences가 있을 때만)
+5. `## 참고할 과거 대화` (similar_messages가 있을 때만)
+6. `## 이번 요청: {type}` — 타입별 응답 형식 지시문
+7. `## 메모리 업데이트` 지시문
+
 어댑터·도구 함수는 deps를 직접 참조하지 않습니다.
 
 ### 3-2. 타입별 orchestrator 처리 방식
@@ -143,18 +167,27 @@ orchestrator는 이를 참고해 적절한 도구를 선택합니다.
 
 모든 type에서 사용자 취향·요약 정보가 감지되면 OrchestratorResult의 `ai_summary`, `preferences` 필드에 값을 채워 반환합니다 (별도 도구 호출 없음).
 
-### 3-3. 도구 호출 및 스트리밍
+### 3-3. 도구 호출 및 응답 수신
 
 ```
-orchestrator_agent.run_stream(user_input, deps=OrchestratorDeps(...), message_history=history)
+build_context_prompt(deps) → context_block 생성
+  ↓
+orchestrator_agent.run(
+    f"{context_block}\n\n---\n\n사용자 메시지: {user_input}",
+    deps=OrchestratorDeps(...),
+    message_history=history,
+)
   ↓
 type에 따라 필요한 도구 호출 (change는 도구 호출 없음)
   ↓
-itinerary 타입이면 → submit_itinerary(day_plans={...}) 호출
-  (텍스트 스트리밍과 병행. dayPlans 구조체를 엔드포인트로 전달)
+OrchestratorResult 구조화 출력 반환 (result.data)
   ↓
-텍스트 토큰 생성 → SSE event: chunk 실시간 전송
+result.data.message → SSE event: chunk 한 번에 전송
+result.data.day_plans / change / reservation / cancel → done 이벤트에 포함
 ```
+
+> 구조화 출력(`result_type=OrchestratorResult`)이기 때문에 `run_stream`이 아닌 `run`을 사용합니다.
+> chunk 이벤트는 스트리밍이 아닌 단일 전송입니다.
 
 등록된 도구 8개의 입력/출력 명세는 **[docs/agent_tools.md](agent_tools.md)** 참조.
 
