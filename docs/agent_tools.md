@@ -345,15 +345,49 @@ classification_agent 대신 orchestrator가 직접 구조체를 생성하므로 
 | `time` | `str` | Y | `"HH:MM ~ HH:MM"` 형식 |
 | `place` | `str` | Y | 장소명 |
 | `note` | `str` | N | 메모. 생략 시 `""` |
+| `cost` | `ItemCost \| null` | N | 1인 기준 예상 비용. 무료이면 `null` |
+
+#### ItemCost 구조
+
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `amount` | `float` | Y | 1인 기준 금액 |
+| `currency` | `str` | Y | ISO 4217 통화 코드. 예) `"JPY"`, `"KRW"`, `"USD"` |
 
 #### 입력 예시
 
 ```json
 {
   "day_plans": {
-    "2026-05-01": [
-      { "plan_name": "창덕궁 방문", "time": "09:00 ~ 12:00", "place": "창덕궁", "note": "후원 투어 예약 필요" },
-      { "plan_name": "광장시장 점심", "time": "12:00 ~ 14:30", "place": "광장시장", "note": "" }
+    "1일차": [
+      {
+        "plan_name": "인천공항 → 나리타공항 (대한항공 KE705)",
+        "time": "10:00 ~ 12:30",
+        "place": "Narita International Airport",
+        "note": "대한항공 KE705, 직항 2시간 30분",
+        "cost": { "amount": 450000, "currency": "KRW" }
+      },
+      {
+        "plan_name": "나리타공항 → 신주쿠역 이동 (나리타 익스프레스)",
+        "time": "13:30 ~ 15:00",
+        "place": "Narita Express (NEX)",
+        "note": "신주쿠 직행, 약 90분",
+        "cost": { "amount": 3070, "currency": "JPY" }
+      },
+      {
+        "plan_name": "신주쿠 그랜드 호텔 체크인",
+        "time": "15:00 ~ 16:00",
+        "place": "Shinjuku Grand Hotel",
+        "note": "1박 15,000엔, 조식 포함",
+        "cost": { "amount": 15000, "currency": "JPY" }
+      },
+      {
+        "plan_name": "저녁식사 — 신주쿠 라멘",
+        "time": "18:30 ~ 19:30",
+        "place": "Fuunji Ramen, Shinjuku",
+        "note": "",
+        "cost": { "amount": 1200, "currency": "JPY" }
+      }
     ]
   }
 }

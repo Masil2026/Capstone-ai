@@ -78,18 +78,18 @@ class WeatherAdapter(ApiTools):
                 lat = location["latitude"]
                 lon = location["longitude"]
 
-                # 2-A. 4일 이내 → Hourly 예보 (시간대별 상세 데이터)
+                # 2-A. 4일 이내 → Hourly API 호출 후 일별 요약으로 집계
+                # (hourly 96개 그대로 반환하면 LLM 컨텍스트 낭비 → daily 4개로 압축)
                 if forecast_days <= 4:
                     try:
                         weather_response = await client.get(WEATHER_URL, params={
                             "latitude": lat,
                             "longitude": lon,
                             "hourly": ",".join([
-                                "temperature_2m",              # 지상 2m 기온 (°C)
-                                "apparent_temperature",        # 체감온도 (바람/습도 반영)
-                                "precipitation_probability",   # 강수확률 (%)
-                                "weathercode",                 # 날씨 상태 코드
-                                "windspeed_10m",               # 지상 10m 풍속 (km/h)
+                                "temperature_2m",
+                                "apparent_temperature",
+                                "precipitation_probability",
+                                "weathercode",
                             ]),
                             "forecast_days": forecast_days,
                             "timezone": timezone,
@@ -111,24 +111,38 @@ class WeatherAdapter(ApiTools):
                     if weather_response.status_code != 200:
                         return {"status": "error", "message": f"Weather API 오류: {weather_response.status_code}"}
 
-                    # 3. 결과 데이터 정제 (hourly)
+                    # hourly → daily 집계 (24항목/일 → 1항목/일)
                     hourly = weather_data["hourly"]
-                    processed_forecast = [
-                        {
-                            "time": hourly["time"][i],
-                            "temperature": hourly["temperature_2m"][i],
-                            "apparent_temperature": hourly["apparent_temperature"][i],
-                            "precipitation_probability": hourly["precipitation_probability"][i],
-                            "weather": WEATHERCODE_MAP.get(hourly["weathercode"][i], f"알 수 없음 ({hourly['weathercode'][i]})"),
-                            "windspeed": hourly["windspeed_10m"][i],
-                        }
-                        for i in range(len(hourly["time"]))
-                    ]
+                    from collections import defaultdict
+                    daily_buckets: dict[str, list] = defaultdict(list)
+                    for i, ts in enumerate(hourly["time"]):
+                        date = ts[:10]
+                        daily_buckets[date].append({
+                            "temp": hourly["temperature_2m"][i],
+                            "apparent": hourly["apparent_temperature"][i],
+                            "precip": hourly["precipitation_probability"][i],
+                            "code": hourly["weathercode"][i],
+                        })
+
+                    processed_forecast = []
+                    for date in sorted(daily_buckets):
+                        bucket = daily_buckets[date]
+                        temps = [h["temp"] for h in bucket if h["temp"] is not None]
+                        precips = [h["precip"] for h in bucket if h["precip"] is not None]
+                        codes = [h["code"] for h in bucket if h["code"] is not None]
+                        most_common_code = max(set(codes), key=codes.count) if codes else 0
+                        processed_forecast.append({
+                            "date": date,
+                            "temperature_max": max(temps) if temps else None,
+                            "temperature_min": min(temps) if temps else None,
+                            "precipitation_probability_max": max(precips) if precips else 0,
+                            "weather": WEATHERCODE_MAP.get(most_common_code, f"알 수 없음 ({most_common_code})"),
+                        })
 
                     return {
                         "status": "success",
                         "city": location["name"],
-                        "forecast_type": "hourly",
+                        "forecast_type": "daily",
                         "forecast_days": forecast_days,
                         "count": len(processed_forecast),
                         "data": processed_forecast,

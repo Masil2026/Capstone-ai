@@ -1,6 +1,7 @@
 import httpx
 from app.core.ApiToolsInterfaces import ApiTools
 from app.core.config import settings
+from app.services.adapters.currency_converter import to_krw
 from typing import Any, Dict
 
 class FlightAdapter(ApiTools):
@@ -120,9 +121,14 @@ class FlightAdapter(ApiTools):
                 processed_results = []
                 for offer in offers[:10]: # 항공편 중 상위 10개만 뽑음
                     segments = offer["slices"][0]["segments"]
+                    orig_amount = float(offer["total_amount"])
+                    orig_currency = offer["total_currency"]
+                    price_krw = await to_krw(orig_amount, orig_currency)
                     processed_results.append({
                         "offer_id": offer["id"],
-                        "total_amount": f"{offer['total_amount']} {offer['total_currency']}",
+                        "price_original": orig_amount,   # 현지 통화 금액
+                        "currency": orig_currency,        # 현지 통화 코드
+                        "price_krw": price_krw,           # 한화 환산 금액
                         "airline": offer["owner"]["name"],
                         "origin": segments[0]["origin"]["iata_code"],
                         "destination": segments[-1]["destination"]["iata_code"],

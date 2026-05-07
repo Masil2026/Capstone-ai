@@ -148,6 +148,59 @@ history = result.all_messages()
 result2 = await agent.run("다음 입력", message_history=history)
 ```
 
+## pydantic-ai 동적 컨텍스트 주입 — 0.0.54 버그 우회
+
+**`@agent.system_prompt` + `RunContext` 패턴은 사용하지 않는다.**
+
+pydantic-ai 0.0.54에서 `@agent.system_prompt`에 `RunContext`를 받는 함수를 등록하면,
+`async def`든 `def`든 `agent.run()` 시점에 **조용히 호출되지 않는 버그**가 있다.
+오류도 없이 시스템 프롬프트 함수가 무시되어 LLM이 컨텍스트 없이 응답한다.
+
+```python
+# ❌ 하지 말 것 — 0.0.54에서 호출되지 않음
+@agent.system_prompt
+async def build_prompt(ctx: RunContext[MyDeps]) -> str:
+    return f"컨텍스트: {ctx.deps.something}"   # LLM에 전달되지 않음
+
+# ❌ def로 바꿔도 마찬가지
+@agent.system_prompt
+def build_prompt(ctx: RunContext[MyDeps]) -> str:
+    return f"컨텍스트: {ctx.deps.something}"   # 여전히 호출되지 않음
+```
+
+**올바른 패턴**: 컨텍스트 블록을 일반 함수로 생성하고 `agent.run()` 직전에 user_message 앞에 붙인다.
+
+```python
+# ✅ 올바른 패턴
+agent = Agent(
+    model=...,
+    deps_type=MyDeps,
+    result_type=MyOutput,
+    system_prompt="역할 설명 (정적 문자열만)",  # 동적 데이터 없음
+)
+
+def build_context_prompt(deps: MyDeps) -> str:
+    """동적 컨텍스트 블록 생성 — agent.run() 직전에 호출"""
+    sections = []
+    if deps.current_itinerary:
+        sections.append(f"## 현재 여행 정보\n- 여행지: {deps.current_itinerary['destination']}")
+    if deps.ai_summary:
+        sections.append(f"## 이전 대화 요약\n{deps.ai_summary}")
+    # ...
+    return "\n\n".join(sections)
+
+# 호출 시
+context_block = build_context_prompt(deps)
+result = await agent.run(
+    f"{context_block}\n\n---\n\n사용자 메시지: {user_message}",
+    deps=deps,
+    message_history=history,
+)
+```
+
+`RunContext` 없이 deps를 받지 않는 단순 함수는 `@agent.system_prompt`로 등록해도 동작한다.
+단, 동적 데이터가 필요하면 반드시 위 패턴을 사용한다.
+
 ## pydantic-ai 스트리밍 (SSE용)
 
 `agent.run_stream()`은 비동기 컨텍스트 매니저로 사용한다. 스트리밍 완료 후 `result.data`로 전체 응답을 얻는다.
@@ -165,13 +218,13 @@ async def _stream():
 return StreamingResponse(_stream(), media_type="text/event-stream")
 ```
 
-`result_type`이 지정된 에이전트 (`classification_agent`)는 `run_stream` 대신 `run`을 사용한다.
+`result_type`이 지정된 에이전트는 `run_stream` 대신 `run`을 사용한다.
 구조화 출력은 스트리밍이 아닌 단일 호출로 처리한다.
 
 ```python
-# classification_agent — result_type=ResponseClassification 지정된 경우
-result = await classification_agent.run("분류할 텍스트")
-classification: ResponseClassification = result.data
+# classification_agent, orchestrator_agent — result_type 지정된 경우
+result = await agent.run("분류할 텍스트")
+output = result.data   # 구조화 Pydantic 객체
 ```
 
 ---

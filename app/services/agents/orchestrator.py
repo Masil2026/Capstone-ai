@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent
 
-from app.schemas.ai_message import DayPlanItem
-from app.services.adapters.flight_api import FlightAdapter
-from app.services.adapters.accommodation_api import AccommodationAdapter
+_log = logging.getLogger(__name__)
+
+from app.schemas.ai_message import OrchestratorResult
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
@@ -25,14 +26,22 @@ class OrchestratorDeps:
     preferences: dict | None        # 사용자 취향 JSON (Redis memory)
     today: str                      # YYYY-MM-DD — 날짜 계산 기준
     similar_messages: list[dict]    # pgvector 유사 과거 메시지 최대 5개
-    current_itinerary: dict | None  # 현재 여행 일정 dayPlans (DB read-only, roomId 기준)
+    current_itinerary: dict | None  # 현재 여행 일정 (DB read-only)
     request_type: str               # classification_agent 판별 결과
 
 # ---------------------------------------------------------------------------
 # 오케스트레이터 에이전트
 # ---------------------------------------------------------------------------
 
-orchestrator_agent = Agent(model=_build_model("orchestrator"), deps_type=OrchestratorDeps)
+orchestrator_agent = Agent(
+    model=_build_model("orchestrator"),
+    deps_type=OrchestratorDeps,
+    result_type=OrchestratorResult,
+    system_prompt=(
+        "당신은 여행 계획 전문 AI 어시스턴트입니다.\n"
+        "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다."
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # 동적 시스템 프롬프트
@@ -40,113 +49,194 @@ orchestrator_agent = Agent(model=_build_model("orchestrator"), deps_type=Orchest
 
 _TYPE_INSTRUCTIONS: dict[str, str] = {
     "itinerary": """\
-## 이번 요청: 일정 생성/수정 (itinerary)
+## 이번 요청: 여행 일정 생성/수정 (itinerary)
 
-### current_itinerary가 None인 경우 — 신규 일정 생성
-1. 아래 도구를 모두 호출하여 정보를 수집한다.
-   - search_web: 여행지 관광 명소·현지 팁·트렌드
-   - get_weather (16일 이내) 또는 get_historical_weather (16일 초과)
-   - search_place: 주요 장소 위치·평점
-   - find_route: 장소 간 이동 수단·소요 시간
-   - search_flights: 출발지→목적지 항공편
-   - search_hotels: 여행 기간 숙소
-2. 수집한 정보를 바탕으로 전체 일정을 생성하고 submit_itinerary(day_plans)를 호출한다.
+**[응답 형식 — 반드시 준수]**
+반환 JSON의 필드를 아래와 같이 채워야 한다:
+- `day_plans`: 날짜별 일정 (키='YYYY-MM-DD').
+  - **신규 생성** (기존 일정 없음): 모든 날짜 포함.
+  - **수정** (기존 일정 있음): **사용자가 요청한 날짜만** 반환. 나머지 날짜는 포함하지 않는다.
+- `message`: 아래 기준으로 작성한다.
+  - **신규 생성**: 날짜별 주요 코스를 간략히 소개한다.
+    예) "1일차는 아사쿠사 → 센소지 → 나카미세 거리 코스로, 저녁에는 원하신 참치회 식당을 배치했습니다. 2일차는 신주쿠 → 하라주쿠 쇼핑 코스로 구성했습니다."
+  - **수정**: 반영한 요청과 변경 결과를 구체적으로 설명한다.
+    예) "해산물 요청을 반영해 1일차 저녁을 해산물 식당으로 변경했습니다. 3일차에는 시장 방문 코스를 새로 추가했습니다."
+- `ai_summary`: 번호 목록 형식. 아래 [메모리 업데이트] 참고.
 
-### current_itinerary가 있는 경우 — 기존 일정 수정
-1. 사용자가 변경 요청한 부분만 수정한다.
-2. 아래 도구를 필요한 경우에만 선택적으로 호출한다.
-   - search_web: 변경 장소의 여행 정보가 필요할 때
-   - get_weather / get_historical_weather: 날씨 재확인이 필요할 때
-   - search_place: 새로 추가하는 장소 정보가 필요할 때
-   - find_route: 변경으로 인해 이동 경로가 달라질 때
-   - search_flights: 항공편 변경을 요청했을 때만
-   - search_hotels: 숙소 변경을 요청했을 때만
-3. 수정된 전체 일정으로 submit_itinerary(day_plans)를 호출한다.
-
-### 공통
-- day_plans 키 형식: "1일차", "2일차", ...
-- 각 항목 필드: plan_name, time("HH:MM ~ HH:MM"), place, note
-- 텍스트 응답으로 일정 요약과 주요 추천 이유를 설명한다.""",
+처리:
+1. current_itinerary(여행 기본 정보)가 있으면 반드시 참고한다.
+2. current_itinerary가 없거나 destination·start_date가 비어있으면 일정을 생성하지 말고,
+   사용자에게 여행지·날짜·인원·예산을 먼저 물어봐라. (day_plans는 null로 둔다)
+3. 기본 정보가 모두 있으면 get_weather, search_web, search_place, find_route 도구를 활용해 일정을 구성한다.
+4. 기존 day_plans가 있으면 사용자 요청에 해당하는 날짜 일정만 새로 작성하여 반환한다.""",
 
     "change": """\
 ## 이번 요청: 여행 기본 정보 변경 (change)
 
-처리 순서:
-1. 외부 API 도구(search_flights, search_hotels, search_web 등)는 호출하지 않는다.
-2. 사용자 메시지에서 변경된 필드만 추출한다.
-   - 변경 가능 필드: start_date, end_date, budget, adult_count, child_count, child_ages
-   - 변경하지 않은 필드는 전달하지 않는다.
-3. submit_change(변경된 필드만 포함)를 호출한다.
-4. 텍스트 응답으로 변경 내용을 확인해준다.""",
+**[응답 형식 — 반드시 준수]**
+반환 JSON의 필드를 아래와 같이 채워야 한다:
+- `change`: 변경된 필드만 포함 (변경하지 않은 필드는 null)
+  가능한 필드: start_date, end_date, budget, adult_count, child_count, child_ages
+- `message`: 무엇이 어떻게 변경되었는지 구체적으로 안내한다.
+  예) "여행 기간을 5월 3일~7일로 변경하고, 예산을 50만원으로 조정했습니다."
+- `ai_summary`: 번호 목록 형식. 아래 [메모리 업데이트] 참고.
+
+처리:
+1. 외부 API 도구는 호출하지 않는다.
+2. 사용자 메시지에서 변경된 필드만 추출하여 change 필드에 작성한다.""",
 
     "reservation": """\
 ## 이번 요청: 예약 (reservation)
 
-처리 순서:
+**[응답 형식 — 반드시 준수]**
+반환 JSON의 필드를 아래와 같이 채워야 한다:
+- `reservation.reservation_type`: "flight" 또는 "hotel"
+- `reservation.detail`: **반드시 JSON 객체(dict)로 작성한다. 문자열 금지.**
+  숙소 예시: {"name": "신주쿠 그랜드 호텔", "check_in": "2026-05-01", "check_out": "2026-05-03", "rooms": 1}
+  항공 예시: {"airline": "대한항공", "flight_no": "KE705", "departure": "ICN", "arrival": "NRT", "date": "2026-05-01"}
+- `reservation.total_price`: 숫자 (소수점 허용)
+- `reservation.currency`: 통화 코드 (예: "KRW")
+- `message`: 예약 결과를 간략히 요약한다. 숙소명·항공편명·예약 번호·날짜·금액 등 핵심 정보를 포함한다.
+  예) "신주쿠 그랜드 호텔 5월 1일~3일(2박) 예약이 완료되었습니다. 약 번호: HTL-20260501-0042 / 총 요금: 320,000원"
+  예) "대한항공 KE705 (인천→나리타, 5월 1일 10:00) 예약이 완료되었습니다. 예약 번호: KE-20260501-7823 / 총 요금: 450,000원"
+
+처리:
 1. 항공권이면 book_flight, 숙소이면 book_hotel을 호출한다.
-   - 검색과 예약이 도구 내부에서 자동으로 처리되므로 search_flights/search_hotels를 별도로 호출하지 않는다.
-   - current_itinerary가 있으면 날짜·목적지·인원을 참고한다.
-   - preferences에 선호 항공사·호텔 체인 정보가 있으면 참고한다.
    (현재 미구현 — status: todo 반환. 향후 Duffel booking API 연결 예정)
-2. submit_reservation(reservation_type, detail, total_price, currency 등)을 호출한다.""",
+2. 결과를 reservation 필드에 작성한다.""",
 
     "cancel": """\
 ## 이번 요청: 예약 취소 (cancel)
 
-처리 순서:
-1. 취소 대상이 항공권인지 숙소인지 확인한다.
-2. 항공권이면 cancel_flight(order_id), 숙소이면 cancel_hotel(booking_id)을 호출한다.
+**[응답 형식 — 반드시 준수]**
+반환 JSON의 필드를 아래와 같이 채워야 한다:
+- `cancel`: 취소 정보 (reservation_id, cancelled_at)
+- `message`: 어떤 예약이 취소되었는지 핵심 정보를 포함해 안내한다. 숙소명·항공편명·예약 번호를 명시한다.
+  예) "신주쿠 그랜드 호텔 예약(예약 번호: HTL-20260501-0042)이 취소되었습니다."
+  예) "대한항공 KE705편 예약(예약 번호: KE-20260501-7823)이 취소 처리되었습니다."
+
+처리:
+1. 항공권이면 cancel_flight, 숙소이면 cancel_hotel을 호출한다.
    (현재 미구현 — status: todo 반환. 향후 Duffel cancel API 연결 예정)
-3. submit_cancel(reservation_id, cancelled_at)을 호출해 취소 정보를 시스템에 전달한다.
-4. 텍스트 응답으로 취소 접수 완료를 안내한다.""",
+2. 결과를 cancel 필드에 작성한다.""",
 
     "chat": """\
 ## 이번 요청: 일반 대화/질문 (chat)
 
-처리 순서:
-1. submit_itinerary, submit_change, submit_reservation, submit_cancel은 호출하지 않는다.
-2. 질문 내용에 따라 search_web, get_weather 등을 활용한다.
-3. 친절하고 유익한 텍스트 응답을 제공한다.""",
+**[응답 형식]**
+- `message`: 반드시 실제 내용을 담은 텍스트 응답. "확인해드릴게요" 같은 안내 문구만 쓰고 끝내지 말 것.
+- day_plans·change·reservation·cancel 필드는 null로 둔다.
+
+**[일정 관련 질문]**
+- 여행 날짜·목적지·인원·예산 등 기본 정보를 묻는 질문이면 `## 현재 여행 일정` 섹션의 데이터를 그대로 읽어 구체적으로 답한다.
+- 이미 주입된 컨텍스트로 답할 수 있으면 외부 API 도구를 호출하지 않는다.
+- 현재 일정이 없으면(current_itinerary = null) 없다고 명확히 안내한다.
+
+**[그 외 질문]**
+- 필요 시 search_web, get_weather 등 도구를 활용한다.""",
 }
 
 _MEMORY_INSTRUCTION = """\
-## 메모리 업데이트 (모든 타입 공통)
-대화 중 사용자의 취향(음식 선호·이동 수단·숙박 스타일 등)이나 기억할 정보가 감지되면
-update_memory(ai_summary=..., preferences=...)를 호출한다.
-감지되지 않으면 호출하지 않는다."""
+## 메모리 업데이트
+
+### ai_summary
+- itinerary·change 처리 후에는 `ai_summary` 필드에 반드시 작성한다.
+- **형식: 번호 목록.** 각 항목은 한 줄로 핵심 사실만 기술한다.
+  예)
+  1. 제주도 3박 4일 일정 생성 (5월 1일~3일, 성인 2명, 예산 30만원)
+  2. 1일차 저녁 해산물 식당 요청 반영
+  3. 숙소: 제주 그랜드 호텔 (5월 1일~3일)
+- 이전 대화 요약(## 이전 대화 요약)이 있으면 기존 항목을 유지하고, 이번 대화 내용을 새 번호로 추가한다.
+  예) 기존 항목 1~3이 있고 이번에 날짜 변경 요청 시 → 4. 여행 기간 5월 3일~7일로 변경
+- chat·reservation·cancel 타입에서 ai_summary 변화 없으면 null로 둔다.
+
+### preferences — 사용자가 직접 말한 것만 추출
+⚠️ **AI가 응답을 생성하면서 선택한 것(추천 장소, 이동 수단, 일정 스타일 등)을 취향으로 기록하면 안 된다.**
+반드시 **사용자 메시지에 실제로 포함된 표현**에서만 추출한다.
+
+추출 가능 카테고리 (키 예시):
+- `food` : 사용자가 먹고 싶다고 말한 음식 (예: ["해산물", "참치회"])
+- `food_avoid` : 사용자가 싫다고 한 음식 (예: "고수")
+- `transport` : 사용자가 선호한다고 말한 이동 수단
+- `accommodation` : 사용자가 선호한다고 말한 숙박 스타일
+- `activities` : 사용자가 하고 싶다고 직접 말한 활동
+- `pace` : 사용자가 원한다고 말한 여행 속도
+- `budget_style` : 사용자가 언급한 예산 방식
+- `travel_with` : 사용자가 언급한 동행 특성
+- 사용자가 직접 말한 다른 취향도 적절한 키로 추가한다.
+
+출력 예시 (사용자가 "해산물이랑 참치회 먹고 싶어"라고만 했을 때):
+```json
+{"food": ["해산물", "참치회"]}
+```
+
+**기존 ## 사용자 취향이 있으면 그 내용을 그대로 포함하고, 새 항목을 추가/수정한 전체 dict를 반환한다.**
+새로 감지된 취향이 없어도 기존 취향이 있으면 기존 값을 그대로 반환한다.
+사용자 메시지에 취향 관련 내용이 없고 기존 취향도 없으면 빈 dict {}를 반환한다."""
 
 
-@orchestrator_agent.system_prompt
-async def build_system_prompt(ctx: RunContext[OrchestratorDeps]) -> str:
-    deps = ctx.deps
-    sections: list[str] = []
-
-    sections.append(
-        "당신은 여행 계획 전문 AI 어시스턴트입니다.\n"
-        "사용자 요청에 따라 적절한 도구를 선택하고, 자연스러운 텍스트 응답과 함께 "
-        "구조화 데이터를 submit_* 도구로 시스템에 전달합니다."
+def build_context_prompt(deps: OrchestratorDeps) -> str:
+    """OrchestratorDeps를 읽어 컨텍스트 블록 문자열을 반환한다.
+    orchestrator_agent.run() 호출 전에 user_message 앞에 붙인다.
+    """
+    print(
+        f"\n[orchestrator_agent] build_context_prompt 호출\n"
+        f"  request_type     : {deps.request_type}\n"
+        f"  today            : {deps.today}\n"
+        f"  ai_summary       : {deps.ai_summary}\n"
+        f"  preferences      : {deps.preferences}\n"
+        f"  similar_messages : {len(deps.similar_messages)}건\n"
+        f"  current_itinerary: "
+        f"{({k: v for k, v in deps.current_itinerary.items() if k != 'day_plans'} if deps.current_itinerary else None)}",
+        flush=True,
     )
+    sections: list[str] = []
     sections.append(f"오늘 날짜: {deps.today}")
-    sections.append(_TYPE_INSTRUCTIONS.get(deps.request_type, _TYPE_INSTRUCTIONS["chat"]))
-    sections.append(_MEMORY_INSTRUCTION)
+
+    if deps.current_itinerary:
+        it = deps.current_itinerary
+        child_ages = it.get("child_ages") or []
+        child_str = f"{it.get('child_count')}명 (나이: {child_ages})" if it.get("child_count") else "없음"
+        budget = it.get("budget")
+        budget_str = f"{int(budget):,}원" if budget else "미설정"
+        day_plans = it.get("day_plans")
+
+        section_lines = [
+            "## 현재 여행 기본 정보 (DB에서 조회된 실제 값 — 반드시 이 데이터를 기준으로 답변할 것)",
+            f"- 여행지: {it.get('destination')}",
+            f"- 여행 기간: {it.get('start_date')} ~ {it.get('end_date')} ({it.get('total_days')}일)",
+            f"- 예산: {budget_str}",
+            f"- 성인: {it.get('adult_count')}명",
+            f"- 어린이: {child_str}",
+        ]
+        if day_plans:
+            section_lines.append("")
+            section_lines.append("### 기존 일정 (수정 시 반드시 이 내용을 기준으로 변경할 것)")
+            for date_key, items in day_plans.items():
+                section_lines.append(f"#### {date_key}")
+                for item in items:
+                    if isinstance(item, dict):
+                        section_lines.append(
+                            f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})"
+                        )
+        else:
+            section_lines.append("- day_plans: 아직 없음")
+        sections.append("\n".join(section_lines))
+    else:
+        sections.append("## 현재 여행 기본 정보\n아직 여행 일정이 등록되지 않았습니다.")
 
     if deps.ai_summary:
         sections.append(f"## 이전 대화 요약\n{deps.ai_summary}")
 
     if deps.preferences:
-        sections.append(
-            f"## 사용자 취향\n{json.dumps(deps.preferences, ensure_ascii=False, indent=2)}"
-        )
-
-    if deps.current_itinerary:
-        sections.append(
-            f"## 현재 여행 일정\n"
-            f"{json.dumps(deps.current_itinerary, ensure_ascii=False, indent=2)}"
-        )
+        sections.append(f"## 사용자 취향\n{json.dumps(deps.preferences, ensure_ascii=False, indent=2)}")
 
     if deps.similar_messages:
         msgs = "\n".join(f"[{m['role']}] {m['content']}" for m in deps.similar_messages)
         sections.append(f"## 참고할 과거 대화\n{msgs}")
+
+    sections.append(_TYPE_INSTRUCTIONS.get(deps.request_type, _TYPE_INSTRUCTIONS["chat"]))
+    sections.append(_MEMORY_INSTRUCTION)
 
     return "\n\n".join(sections)
 
@@ -156,74 +246,14 @@ async def build_system_prompt(ctx: RunContext[OrchestratorDeps]) -> str:
 # ---------------------------------------------------------------------------
 
 _service = TravelAgentService({
-    "duffel_flight":        FlightAdapter(),
-    "duffel_accommodation": AccommodationAdapter(),
-    "tavily_search":        TavilySearchAdapter(),
-    "weather":              WeatherAdapter(),
-    "google_maps":          GoogleMapsAdapter(),
+    "tavily_search": TavilySearchAdapter(),
+    "weather":       WeatherAdapter(),
+    "google_maps":   GoogleMapsAdapter(),
 })
 
 # ---------------------------------------------------------------------------
 # 도구 등록
 # ---------------------------------------------------------------------------
-
-@orchestrator_agent.tool_plain
-async def search_flights(
-    origin: str,
-    destination: str,
-    departure_date: str,
-    adults: int = 1,
-    children: int = 0,
-    child_ages: list[int] | None = None,
-) -> dict:
-    """항공권 검색.
-
-    신규 일정 생성 시 반드시 호출. 기존 일정 수정 시에는 사용자가 항공편 변경을 요청할 때만 호출.
-    - origin/destination: 영문 도시명(Seoul, Tokyo, Osaka) 또는 IATA 코드(ICN, NRT, KIX) 모두 허용
-    - departure_date: YYYY-MM-DD 형식. 예) "2026-05-15"
-    - children >= 1이면 child_ages에 각 아이 나이를 반드시 포함. 개수 불일치 시 에러.
-      예) children=2, child_ages=[5, 8]
-    - 반환: {status, count, data: [{airline, origin, destination, total_amount, stops, departing_at}]}
-    """
-    return await _service.process_task("duffel_flight", "search_flights", {
-        "origin": origin,
-        "destination": destination,
-        "departure_date": departure_date,
-        "adults": adults,
-        "children": children,
-        "child_ages": child_ages or [],
-    })
-
-
-@orchestrator_agent.tool_plain
-async def search_hotels(
-    city_name: str,
-    check_in: str,
-    check_out: str,
-    adults: int = 1,
-    rooms: int = 1,
-    children: int = 0,
-    child_ages: list[int] | None = None,
-) -> dict:
-    """숙소 검색.
-
-    신규 일정 생성 시 반드시 호출. 기존 일정 수정 시에는 사용자가 숙소 변경을 요청할 때만 호출.
-    - city_name: 영문 또는 한글 도시명. 예) "Tokyo", "Osaka", "도쿄"
-    - check_in/check_out: YYYY-MM-DD 형식. 예) check_in="2026-06-15", check_out="2026-06-18" (3박)
-    - children >= 1이면 child_ages에 각 아이 나이를 반드시 포함. 개수 불일치 시 에러.
-      예) children=1, child_ages=[7]
-    - 반환: {status, count, data: [{name, price, rating, address}]} 최대 10개
-    """
-    return await _service.process_task("duffel_accommodation", "search_hotels", {
-        "city_name": city_name,
-        "check_in": check_in,
-        "check_out": check_out,
-        "adults": adults,
-        "rooms": rooms,
-        "children": children,
-        "child_ages": child_ages or [],
-    })
-
 
 @orchestrator_agent.tool_plain
 async def search_web(
@@ -263,10 +293,15 @@ async def search_web(
 async def get_weather(city: str, forecast_days: int = 7) -> dict:
     """날씨 예보 조회. 여행일이 오늘부터 16일 이내일 때 사용.
 
+    [다중 지역 호출 패턴] 여행 중 도시 이동이 있으면 지역별로 체류 기간만큼 분리 호출:
+      1~2일차 도쿄: get_weather("Tokyo", 2)
+      3~4일차 오사카: get_weather("Osaka", 2)
+    단일 도시 전체 기간: get_weather("Tokyo", 4)  ← 3박 4일
+
     - city: 반드시 영문 도시명. 예) "Seoul", "Tokyo", "Osaka" (한국어 입력 시 에러)
-    - forecast_days: 1~16 사이. 예) 3박 4일이면 4
-    - 반환 (forecast_days <= 4): {forecast_type="hourly", data: [{time, temperature, apparent_temperature, precipitation_probability, weather, windspeed}]}
-    - 반환 (forecast_days >= 5): {forecast_type="daily",  data: [{date, temperature_max, temperature_min, precipitation_probability_max, weather, uv_index_max}]}
+    - forecast_days: 1~16 사이. 여행 기간 일수와 일치시킬 것.
+    - 반환: {forecast_type="daily", data: [{date, temperature_max, temperature_min, precipitation_probability_max, weather}]}
+    - 날씨 결과를 각 날짜 일정에 반영: 강수확률 50% 이상이면 실내 활동 우선
     """
     return await _service.process_task("weather", "get_weather", {
         "city": city,
@@ -276,12 +311,20 @@ async def get_weather(city: str, forecast_days: int = 7) -> dict:
 
 @orchestrator_agent.tool_plain
 async def get_historical_weather(city: str, start_date: str, end_date: str) -> dict:
-    """과거 날씨 조회. 여행일이 오늘부터 16일 초과일 때 작년 같은 시기 데이터를 참고용으로 사용.
+    """과거/장기 날씨 조회. 다음 두 경우에 사용:
+    (1) 여행일이 오늘부터 16일 초과인 미래 — 작년 같은 기간 데이터를 참고용으로 사용
+    (2) 여행일이 이미 지난 날짜 — 그 기간의 실제 날씨 데이터 조회
+
+    [다중 지역 호출 패턴] 도시 이동이 있으면 지역별로 분리 호출:
+      1~2일차 도쿄(2026-08-01~02): get_historical_weather("Tokyo", "2025-08-01", "2025-08-02")
+      3~4일차 오사카(2026-08-03~04): get_historical_weather("Osaka", "2025-08-03", "2025-08-04")
 
     - city: 반드시 영문 도시명. 예) "Seoul", "Tokyo" (한국어 입력 시 에러)
-    - start_date/end_date: YYYY-MM-DD 형식. 여행 날짜의 작년 같은 기간으로 설정.
-      예) 여행이 2026-08-01~2026-08-05이면 start_date="2025-08-01", end_date="2025-08-05"
-    - 반환: {forecast_type="historical", count, data: [{date, temperature_max, temperature_min, apparent_temperature_max, apparent_temperature_min, precipitation_sum, weather, uv_index_max}]}
+    - start_date/end_date:
+        미래 여행: 여행 날짜의 작년 같은 기간. 예) 여행 2026-08-01~05 → "2025-08-01", "2025-08-05"
+        과거 여행: 여행 날짜 그대로. 예) 여행 2026-05-01~03 → "2026-05-01", "2026-05-03"
+    - 반환: {forecast_type="historical", data: [{date, temperature_max, temperature_min, precipitation_sum, weather, uv_index_max}]}
+    - 날씨 결과를 각 날짜 일정에 반영: 강수 가능성 높으면 실내 활동 우선
     """
     return await _service.process_task("weather", "get_historical_weather", {
         "city": city,
@@ -292,11 +335,16 @@ async def get_historical_weather(city: str, start_date: str, end_date: str) -> d
 
 @orchestrator_agent.tool_plain
 async def find_route(origin: str, dest: str, mode: str = "transit") -> dict:
-    """Google Maps 경로 및 소요 시간 조회.
+    """Google Maps 경로 및 소요 시간 조회. 하루 일정의 연속 방문 장소 쌍마다 각각 호출한다.
 
-    - origin/dest: 영문 장소명 또는 주소. 예) origin="Gyeongbokgung Palace, Seoul", dest="Namsan Tower, Seoul"
-    - mode: "transit"(대중교통, 기본값) / "driving"(자동차) / "walking"(도보) / "bicycling"(자전거)
-    - 반환: {status, data: {count, routes: [{start_address, end_address, distance(텍스트), duration(텍스트), steps}]}}
+    [필수 호출 패턴] 하루에 A→B→C→D를 방문하면 반드시 3번 호출:
+      find_route(A, B), find_route(B, C), find_route(C, D)
+    이동 시간을 각 항목의 time 필드에 반영하여 현실적인 시간표를 구성한다.
+
+    - origin/dest: 영문 장소명 + 도시명. 예) "Senso-ji Temple, Tokyo", "Shinjuku Station, Tokyo"
+    - mode: "transit"(대중교통, 기본값) / "walking"(도보, 1km 이내) / "driving" / "bicycling"
+    - 반환: {status, data: {routes: [{distance, duration, steps}]}}
+    - 이동 소요 시간을 일정 time에 반영: 예) 이동 30분이면 앞 일정 종료 후 30분 버퍼 추가
     """
     return await _service.process_task("google_maps", "find_route", {
         "origin": origin,
@@ -307,67 +355,16 @@ async def find_route(origin: str, dest: str, mode: str = "transit") -> dict:
 
 @orchestrator_agent.tool_plain
 async def search_place(query: str) -> dict:
-    """Google Maps 장소 검색. 식당·관광지·카페 등 위치·평점·주소 정보 조회.
+    """Google Maps 장소 검색. 방문 예정인 관광지·식당·카페를 개별 검색하여 위치·평점 확인.
 
-    - query: 장소명 또는 키워드. 예) "신주쿠 라멘 맛집", "오사카 도톤보리", "교토 금각사"
-    - 반환: {status, data: {count, places: [{name, formatted_address, lat, lng, rating, user_ratings_total, types}]}}
+    - query: 구체적인 장소명 또는 키워드. 예) "Senso-ji Temple Tokyo", "도쿄 신주쿠 라멘 맛집"
+    - 검색 결과의 rating·user_ratings_total로 장소 품질 판단. 평점 3.5 미만이면 대안 검색 권장.
+    - 반환: {status, data: {places: [{name, formatted_address, lat, lng, rating, user_ratings_total, types}]}}
+    - 확인한 장소명·주소를 find_route 호출 시 origin/dest로 사용
     """
     return await _service.process_task("google_maps", "search_place", {
         "query": query,
     })
-
-
-@orchestrator_agent.tool_plain
-async def submit_itinerary(day_plans: dict[str, list[DayPlanItem]]) -> dict:
-    """itinerary 타입 전용. 일정 생성/수정 완료 시 반드시 호출. 구조화된 dayPlans를 시스템에 전달한다."""
-    return {"status": "success", "message": "일정이 저장되었습니다."}
-
-
-@orchestrator_agent.tool_plain
-async def submit_change(
-    start_date: str | None = None,
-    end_date: str | None = None,
-    budget: float | None = None,
-    adult_count: int | None = None,
-    child_count: int | None = None,
-    child_ages: list[int] | None = None,
-) -> dict:
-    """change 타입 전용. 변경된 여행 기본 정보를 시스템에 전달한다. 변경된 필드만 포함."""
-    return {"status": "success", "message": "변경 정보가 저장되었습니다."}
-
-
-@orchestrator_agent.tool_plain
-async def submit_reservation(
-    reservation_type: str,
-    detail: dict,
-    booking_url: str | None = None,
-    external_ref_id: str | None = None,
-    total_price: float | None = None,
-    currency: str | None = None,
-    reserved_at: str | None = None,
-) -> dict:
-    """reservation 타입 전용. 예약 완료 후 예약 정보를 시스템에 전달한다.
-
-    - reservation_type: "flight" 또는 "hotel"
-    - detail: 반드시 dict(객체)여야 한다. 문자열 불가.
-      항공권 예시: {"airline": "Korean Air", "origin": "ICN", "destination": "NRT",
-                   "departing_at": "2026-05-15T10:00:00", "offer_id": "off_xxx"}
-      숙소 예시:  {"name": "Shinjuku Grand Hotel", "address": "Shinjuku, Tokyo",
-                   "check_in": "2026-05-15", "check_out": "2026-05-18", "hotel_id": "prop_xxx"}
-    - total_price: 숫자형. 예) 450000
-    - currency: 통화 코드. 예) "KRW", "USD"
-    """
-    return {"status": "success", "message": "예약 정보가 저장되었습니다."}
-
-
-@orchestrator_agent.tool_plain
-async def submit_cancel(reservation_id: str, cancelled_at: str) -> dict:
-    """cancel 타입 전용. 취소 완료 후 취소 정보를 시스템에 전달한다.
-
-    - reservation_id: 취소된 예약 ID. 예) "RES-20260515-001"
-    - cancelled_at: 취소 시각. ISO 8601 형식. 예) "2026-05-05T10:00:00Z"
-    """
-    return {"status": "success", "message": "취소 정보가 저장되었습니다."}
 
 
 # ---------------------------------------------------------------------------
@@ -439,10 +436,3 @@ async def cancel_hotel(booking_id: str) -> dict:
     return {"status": "todo", "message": "숙소 취소 API는 현재 개발 중입니다."}
 
 
-@orchestrator_agent.tool_plain
-async def update_memory(
-    ai_summary: str | None = None,
-    preferences: dict | None = None,
-) -> dict:
-    """모든 타입 공통. 대화 중 기억할 정보(취향·요약)가 감지될 때 호출한다."""
-    return {"status": "success", "message": "메모리가 갱신되었습니다."}

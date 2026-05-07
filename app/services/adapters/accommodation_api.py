@@ -1,6 +1,7 @@
 import httpx
 from app.core.ApiToolsInterfaces import ApiTools
 from app.core.config import settings
+from app.services.adapters.currency_converter import to_krw
 from typing import Any, Dict, Optional, Tuple
 
 class AccommodationAdapter(ApiTools):
@@ -174,10 +175,15 @@ class AccommodationAdapter(ApiTools):
                     if isinstance(chain_info, dict):
                         chain_name = chain_info.get("name", "Independent")
 
+                    orig_amount = float(res.get("cheapest_rate_total_amount") or 0)
+                    orig_currency = res.get("cheapest_rate_currency", "USD")
+                    price_krw = await to_krw(orig_amount, orig_currency)
                     processed_hotels.append({
                         "hotel_id": hotel.get("id"),
                         "name": hotel.get("name"),
-                        "price": f"{res.get('cheapest_rate_total_amount')} {res.get('cheapest_rate_currency')}",
+                        "price_original": orig_amount,   # 현지 통화 1박 금액
+                        "currency": orig_currency,        # 현지 통화 코드
+                        "price_krw": price_krw,           # 한화 환산 1박 금액
                         "rating": hotel.get("rating"),
                         "address": address_str,
                         "chain": chain_name
