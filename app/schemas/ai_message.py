@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 # ── 요청 ──────────────────────────────────────────────────────────────────────
@@ -56,6 +57,16 @@ class ReservationFields(BaseModel):
     total_price: float | None = None
     currency: str | None = None
     reserved_at: str | None = None
+
+    @field_validator("detail", mode="before")
+    @classmethod
+    def _coerce_detail(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, ValueError):
+                return {"description": v}
+        return v
 
 
 class OrchestratorResult(BaseModel):

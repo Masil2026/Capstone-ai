@@ -88,9 +88,14 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 
 **[응답 형식 — 반드시 준수]**
 반환 JSON의 필드를 아래와 같이 채워야 한다:
-- `reservation`: 예약 정보 (reservation_type, detail, total_price, currency 등)
+- `reservation.reservation_type`: "flight" 또는 "hotel"
+- `reservation.detail`: **반드시 JSON 객체(dict)로 작성한다. 문자열 금지.**
+  숙소 예시: {"name": "신주쿠 그랜드 호텔", "check_in": "2026-05-01", "check_out": "2026-05-03", "rooms": 1}
+  항공 예시: {"airline": "대한항공", "flight_no": "KE705", "departure": "ICN", "arrival": "NRT", "date": "2026-05-01"}
+- `reservation.total_price`: 숫자 (소수점 허용)
+- `reservation.currency`: 통화 코드 (예: "KRW")
 - `message`: 예약 결과를 간략히 요약한다. 숙소명·항공편명·예약 번호·날짜·금액 등 핵심 정보를 포함한다.
-  예) "신주쿠 그랜드 호텔 5월 1일~3일(2박) 예약이 완료되었습니다. 예약 번호: HTL-20260501-0042 / 총 요금: 320,000원"
+  예) "신주쿠 그랜드 호텔 5월 1일~3일(2박) 예약이 완료되었습니다. 약 번호: HTL-20260501-0042 / 총 요금: 320,000원"
   예) "대한항공 KE705 (인천→나리타, 5월 1일 10:00) 예약이 완료되었습니다. 예약 번호: KE-20260501-7823 / 총 요금: 450,000원"
 
 처리:
