@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from .memory import load_memory, save_memory, save_history
+from .memory import save_memory, save_history
 
 _openai_client = AsyncOpenAI(api_key=settings.GPT_API_KEY)
 _EMBEDDING_MODEL = "text-embedding-3-small"
@@ -132,6 +132,9 @@ def _query_current_itinerary(room_id: str) -> dict | None:
         if row is None:
             return None
 
+        if not row.destination or not row.start_date:
+            return None
+
         day_plans = row.day_plans
         if isinstance(day_plans, str):
             day_plans = json.loads(day_plans)
@@ -170,21 +173,20 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     """
     loop = asyncio.get_running_loop()
 
-    # 임베딩·Redis memory는 독립적이므로 병렬 로드
-    user_embedding, redis_memory = await asyncio.gather(
-        get_user_embedding(user_message),
-        load_memory(room_id),
-    )
+    # 임베딩과 DB 조회 병렬 실행 — ai_summary/preferences는 매 요청 DB에서 직접 조회
+    user_embedding_fut = get_user_embedding(user_message)
+    db_memory_fut = loop.run_in_executor(None, _query_chat_room_memory, room_id)
 
-    # Redis miss → DB에서 로드 후 Redis에 저장
-    if redis_memory is None:
-        try:
-            redis_memory = await loop.run_in_executor(None, _query_chat_room_memory, room_id)
-        except Exception:
-            redis_memory = {"ai_summary": None, "preferences": None}
-        await save_memory(room_id, redis_memory["ai_summary"], redis_memory["preferences"])
+    try:
+        user_embedding, db_memory = await asyncio.gather(user_embedding_fut, db_memory_fut)
+    except Exception:
+        user_embedding = await user_embedding_fut
+        db_memory = {"ai_summary": None, "preferences": None}
 
-    # pgvector 검색 · itinerary 조회 · 대화 히스토리는 임베딩 이후 병렬 실행
+    # DB 값으로 Redis 동기화 — Java 백엔드가 DB에 썼을 수 있으므로 매 요청마다 갱신 (fire-and-forget)
+    asyncio.ensure_future(save_memory(room_id, db_memory["ai_summary"], db_memory["preferences"]))
+
+    # pgvector 검색 · itinerary 조회 · 대화 히스토리 병렬 실행
     similar_fut = loop.run_in_executor(None, _query_similar_messages, room_id, user_embedding)
     itinerary_fut = loop.run_in_executor(None, _query_current_itinerary, room_id)
     history_fut = loop.run_in_executor(None, _query_recent_history, room_id)
@@ -213,8 +215,8 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     return {
         "user_embedding": user_embedding,
         "history": history,
-        "ai_summary": redis_memory["ai_summary"],
-        "preferences": redis_memory["preferences"],
+        "ai_summary": db_memory["ai_summary"],
+        "preferences": db_memory["preferences"],
         "similar_messages": similar_messages,
         "current_itinerary": current_itinerary,
     }

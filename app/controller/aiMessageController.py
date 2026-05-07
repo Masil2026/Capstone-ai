@@ -148,10 +148,10 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     except Exception:
         assistant_embedding = None
 
-    # [8] Redis memory 갱신 — None 필드는 기존 값 유지하여 기억 손실 방지
+    # [8] memory 갱신 — Redis에만 저장, DB는 Java 백엔드가 done 이벤트의 memory 필드를 보고 씀
+    merged_summary = orch_result.ai_summary if orch_result.ai_summary is not None else ctx["ai_summary"]
+    merged_prefs = orch_result.preferences if orch_result.preferences is not None else ctx["preferences"]
     if orch_result.ai_summary is not None or orch_result.preferences is not None:
-        merged_summary = orch_result.ai_summary if orch_result.ai_summary is not None else ctx["ai_summary"]
-        merged_prefs = orch_result.preferences if orch_result.preferences is not None else ctx["preferences"]
         await save_memory(room_id, merged_summary, merged_prefs)
 
     # [9] done 이벤트 전송
@@ -162,6 +162,8 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         full_response=full_response,
         assistant_embedding=assistant_embedding,
         orch_result=orch_result,
+        merged_summary=merged_summary,
+        merged_prefs=merged_prefs,
     )
     if hide_embedding:
         done.userMessage.embedding = None
@@ -176,12 +178,14 @@ def _build_done_event(
     full_response: str,
     assistant_embedding: list[float] | None,
     orch_result: OrchestratorResult,
+    merged_summary: str | None,
+    merged_prefs: dict | None,
 ) -> DoneEvent:
     memory_output = None
-    if orch_result.ai_summary or orch_result.preferences:
+    if orch_result.ai_summary is not None or orch_result.preferences is not None:
         memory_output = MemoryOutput(
-            aiSummary=orch_result.ai_summary,
-            preferences=orch_result.preferences,
+            aiSummary=merged_summary,
+            preferences=merged_prefs,
         )
 
     itinerary = None

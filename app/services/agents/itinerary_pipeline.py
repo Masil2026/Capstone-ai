@@ -238,7 +238,7 @@ async def _synthesizer_prompt(ctx: RunContext[SynthesizerDeps]) -> str:
         "## 필수 출력",
         "- `message`: 일정 핵심 포인트 소개 (내용 재나열 금지, 2~3문장)",
         "- `day_plans`: 모든 날짜 필수. 키='YYYY-MM-DD'",
-        "- `ai_summary`: 한 문장 요약 예) '도쿄 3박4일 일정 생성. 성인 2명.'",
+        "- `ai_summary`: **이전 대화 요약(## 이전 대화 요약)이 있으면 그 내용과 이번 일정 생성 결과를 합쳐 전체 흐름을 하나의 요약으로 작성한다.** 예) '제주도 3박4일 일정 생성. 5월 1일~3일. 성인 2명.'",
         "",
         "## day_plans 각 항목 형식",
         '{"plan_name":"...", "time":"HH:MM ~ HH:MM", "place":"...", "note":"...", "cost":null 또는 {"amount":숫자,"currency":"코드"}}',
@@ -309,6 +309,10 @@ async def _synthesizer_prompt(ctx: RunContext[SynthesizerDeps]) -> str:
     if budget:
         lines += ["", f"## 예산 제약: 총 {budget:,.0f}원 (성인 {adults}명 기준)"]
 
+    if d.preferences:
+        lines += ["", "## 사용자 취향", json.dumps(d.preferences, ensure_ascii=False, indent=2)]
+    if d.ai_summary:
+        lines += ["", "## 이전 대화 요약", d.ai_summary]
     if d.similar_messages:
         msgs = "\n".join(f"[{m['role']}] {m['content']}" for m in d.similar_messages)
         lines += ["", "## 참고할 과거 대화", msgs]

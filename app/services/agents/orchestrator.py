@@ -51,9 +51,11 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 - `ai_summary`: 한 문장 요약. 예) "도쿄 3박4일 일정 생성. 성인 2명."
 
 처리:
-1. current_itinerary(여행 기본 정보)를 반드시 참고한다.
-2. get_weather, search_web, search_place, find_route 도구를 순서대로 활용해 일정을 구성한다.
-3. 기존 day_plans가 있으면 사용자 요청에 따라 해당 부분만 수정하고 나머지는 유지한다.""",
+1. current_itinerary(여행 기본 정보)가 있으면 반드시 참고한다.
+2. current_itinerary가 없거나 destination·start_date가 비어있으면 일정을 생성하지 말고,
+   사용자에게 여행지·날짜·인원·예산을 먼저 물어봐라. (day_plans는 null로 둔다)
+3. 기본 정보가 모두 있으면 get_weather, search_web, search_place, find_route 도구를 활용해 일정을 구성한다.
+4. 기존 day_plans가 있으면 사용자 요청에 따라 해당 부분만 수정하고 나머지는 유지한다.""",
 
     "change": """\
 ## 이번 요청: 여행 기본 정보 변경 (change)
@@ -106,11 +108,13 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 
 _MEMORY_INSTRUCTION = """\
 ## 메모리 업데이트
-- itinerary·change 처리 후에는 `ai_summary` 필드에 반드시 한 문장 요약을 작성한다.
-  예) "도쿄 3박 4일 여행 일정 생성. 5월 1일~3일. 성인 2명. 예산 30만원."
-      "여행 날짜를 5월 3일~7일로 변경."
+- itinerary·change 처리 후에는 `ai_summary` 필드에 반드시 작성한다.
+  **이전 대화 요약(## 이전 대화 요약)이 있으면 그 내용과 이번 대화를 합쳐 전체 대화 흐름을 하나의 요약으로 다시 작성한다.**
+  예) 이전: "제주도 3박4일 일정 생성. 5월 1일~3일." + 현재 변경 →
+      결과: "제주도 3박4일 일정 생성. 5월 1일~3일. 숙소를 한림으로 변경 요청."
 - 새로운 취향이 감지되면 `preferences` 필드를 채운다 (음식·이동 수단·숙박 스타일 등).
-- chat·reservation·cancel에서 변화 없으면 ai_summary·preferences 기존의 데이터 사용(변경 없음)."""
+  **기존 preferences(## 사용자 취향)가 있으면 그 내용을 그대로 포함하고 새 항목을 추가/수정한 전체 dict를 반환한다.**
+- chat·reservation·cancel에서 변화 없으면 ai_summary·preferences는 null로 둔다."""
 
 
 @orchestrator_agent.system_prompt
