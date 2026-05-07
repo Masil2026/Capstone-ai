@@ -96,7 +96,7 @@ _MEMORY_INSTRUCTION = """\
   예) "도쿄 3박 4일 여행 일정 생성. 5월 1일~3일. 성인 2명. 예산 30만원."
       "여행 날짜를 5월 3일~7일로 변경."
 - 새로운 취향이 감지되면 `preferences` 필드를 채운다 (음식·이동 수단·숙박 스타일 등).
-- chat·reservation·cancel에서 변화 없으면 ai_summary·preferences 모두 null."""
+- chat·reservation·cancel에서 변화 없으면 ai_summary·preferences 기존의 데이터 사용(변경 없음)."""
 
 
 @orchestrator_agent.system_prompt

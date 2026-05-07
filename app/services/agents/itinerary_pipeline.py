@@ -89,6 +89,7 @@ class PlannerDeps:
     preferences: dict | None
     ai_summary: str | None
     today: str
+    similar_messages: list[dict]
 
 
 planner_agent = Agent(
@@ -140,6 +141,9 @@ async def _planner_prompt(ctx: RunContext[PlannerDeps]) -> str:
         lines += ["", "## 사용자 취향", json.dumps(d.preferences, ensure_ascii=False, indent=2)]
     if d.ai_summary:
         lines += ["", "## 이전 대화 요약", d.ai_summary]
+    if d.similar_messages:
+        msgs = "\n".join(f"[{m['role']}] {m['content']}" for m in d.similar_messages)
+        lines += ["", "## 참고할 과거 대화", msgs]
 
     lines += ["", "## 날씨"]
     for w in d.weather:
@@ -199,6 +203,7 @@ class SynthesizerDeps:
     preferences: dict | None
     ai_summary: str | None
     today: str
+    similar_messages: list[dict]
 
 
 synthesizer_agent = Agent(
@@ -287,6 +292,10 @@ async def _synthesizer_prompt(ctx: RunContext[SynthesizerDeps]) -> str:
 
     if budget:
         lines += ["", f"## 예산 제약: 총 {budget:,.0f}원 (성인 {adults}명 기준)"]
+
+    if d.similar_messages:
+        msgs = "\n".join(f"[{m['role']}] {m['content']}" for m in d.similar_messages)
+        lines += ["", "## 참고할 과거 대화", msgs]
 
     lines += ["", "## 여행지 정보 요약", d.web_summary]
 
@@ -495,6 +504,7 @@ async def run_itinerary_pipeline(
         preferences=deps.preferences,
         ai_summary=deps.ai_summary,
         today=deps.today,
+        similar_messages=deps.similar_messages,
     )
     planner_result = await planner_agent.run(
         user_message,
@@ -518,9 +528,11 @@ async def run_itinerary_pipeline(
         preferences=deps.preferences,
         ai_summary=deps.ai_summary,
         today=deps.today,
+        similar_messages=deps.similar_messages,
     )
     synth_result = await synthesizer_agent.run(
         f"{destination} {itinerary.get('total_days', '')}일 여행 일정을 완성해줘.",
         deps=synth_deps,
+        message_history=history,
     )
     return synth_result.data
