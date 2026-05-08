@@ -3,7 +3,6 @@ import sys
 
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
-from app.controller.TestController import router as test_router
 from app.controller.aiMessageController import router as ai_message_router
 
 _app_logger = logging.getLogger("app")
@@ -45,7 +44,6 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-app.include_router(test_router, prefix="/api/test", tags=["Test"])
 app.include_router(ai_message_router, prefix="/api/v1", tags=["AI Messages"])
 
 @app.get("/", tags=["Health Check"])

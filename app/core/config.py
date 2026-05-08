@@ -48,10 +48,6 @@ class Settings(BaseSettings):
     # --- OpenAI Embeddings ---
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
-    # --- 테스트 전용 ---
-    TEST_ROOM_ID: Optional[str] = None   # .env에 설정. 실제 DB에 존재하는 채팅방 ID
-
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
