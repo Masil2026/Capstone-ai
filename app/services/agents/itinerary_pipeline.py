@@ -292,6 +292,8 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
     dest = info.get("destination", "여행지")
     budget = info.get("budget")
     adults = info.get("adult_count", 1)
+    children = info.get("child_count", 0)
+    total_people = adults + children
 
     lines = [
         "당신은 여행 일정 완성 전문가입니다.",
@@ -357,18 +359,22 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "- 비 예보 날: 실내 위주 배치 후 note에 날씨 안내",
         "",
         "## cost 작성 규칙",
+        "⚠️ 모든 cost는 '전체 금액' 기준. 1인 기준이 아님.",
         "⚠️ cost=null은 진짜 무료인 경우만. 금액 모를 때도 null. 절대 0 금액 쓰지 말 것.",
         "",
         "- 항공 이동 항목: ## 선택된 항공편의 price_original·currency·price_krw 값을 그대로 사용",
-        '  예) price_original=450.0, currency="USD", price_krw=650000',
-        '      → cost: {"amount": 450.0, "currency": "USD", "amount_krw": 650000}',
-        "- 숙소 체크인 항목: ## 선택된 숙소의 price_krw 값 사용. price_krw가 0이면 cost=null",
-        '  예) price_krw=120000, currency="JPY", price_original=13000',
-        '      → cost: {"amount": 13000, "currency": "JPY", "amount_krw": 120000}',
-        "- 식사·교통·입장료: 현지 물가 기준 추정. amount_krw 생략(자동 환산)",
-        '  예) 일본 라멘: {"amount": 1200, "currency": "JPY"}',
-        '      도쿄 지하철: {"amount": 200, "currency": "JPY"}',
-        '      헝가리 입장료: {"amount": 3000, "currency": "HUF"}',
+        "  (탑승객 전원 합산 금액. currency는 반드시 항공편 데이터의 값 사용, 임의로 변경 금지)",
+        '  예) 항공편 데이터가 price_original=85000, currency="JPY", price_krw=780000이면',
+        '      → cost: {"amount": 85000, "currency": "JPY", "amount_krw": 780000}',
+        "",
+        "- 숙소 체크인 항목: 1박 금액(price_original, price_krw) × 박 수로 전체 숙박 금액 계산",
+        "  박 수 = ## 선택된 숙소의 check_out - check_in 일수. price_krw가 없으면 cost=null",
+        '  예) price_original=13000 JPY, price_krw=120000원, 3박이면',
+        '      → cost: {"amount": 39000, "currency": "JPY", "amount_krw": 360000}',
+        "",
+        f"- 식사·교통·입장료: 현지 물가 기준 1인 추정액 × {total_people}명(총 인원). amount_krw 생략(자동 환산)",
+        f'  예) 1인당 라멘 1,200엔 × {total_people}명: {{"amount": {1200 * total_people}, "currency": "JPY"}}',
+        f'      1인당 지하철 200엔 × {total_people}명: {{"amount": {200 * total_people}, "currency": "JPY"}}',
         "- 국내(한국) 비용: currency='KRW', amount_krw=null",
         "- 무료(공원·야경·산책 등): cost=null",
     ]
