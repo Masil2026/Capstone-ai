@@ -138,7 +138,13 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
 
         if request_type == "itinerary":
             print("[_stream] run_itinerary_pipeline 호출", flush=True)
-            orch_result = await run_itinerary_pipeline(deps, user_message, ctx["history"])
+            orch_result = None
+            async for item in run_itinerary_pipeline(deps, user_message, ctx["history"]):
+                if isinstance(item, str):
+                    yield _sse("chunk", {"content": item})
+                else:
+                    orch_result = item
+
             if orch_result is None:
                 print("[_stream] pipeline None → orchestrator 스트리밍 폴백", flush=True)
                 async with orchestrator_agent.run_stream(
@@ -151,9 +157,6 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
                             yield _sse("chunk", {"content": msg[len(prev_msg):]})
                             prev_msg = msg
                     orch_result = await stream_result.get_output()
-            else:
-                # 파이프라인 완료 — message 전체를 한 번에 전송
-                yield _sse("chunk", {"content": orch_result.message})
         else:
             print("[_stream] orchestrator_agent.run_stream() 호출", flush=True)
             async with orchestrator_agent.run_stream(

@@ -15,6 +15,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import AsyncGenerator
 
 _log = logging.getLogger(__name__)
 
@@ -607,14 +608,14 @@ async def run_itinerary_pipeline(
     deps,           # OrchestratorDeps
     user_message: str,
     history: list,
-) -> OrchestratorResult | None:
+) -> AsyncGenerator[str | OrchestratorResult, None]:
     """
-    current_itinerary(destination, dates, adults 등)가 없으면 None 반환.
-    None이면 호출자가 orchestrator로 폴백.
+    current_itinerary(destination, dates, adults 등)가 없으면 아무것도 yield하지 않고 종료.
+    호출자는 OrchestratorResult를 받지 못하면 orchestrator로 폴백한다.
     """
     itinerary = deps.current_itinerary
     if not itinerary or not itinerary.get("destination") or not itinerary.get("start_date"):
-        return None
+        return
 
     destination = itinerary["destination"]
     start_date = itinerary["start_date"]
@@ -696,9 +697,15 @@ async def run_itinerary_pipeline(
         flush=True,
     )
     synth_context = _build_synthesizer_prompt(synth_deps)
-    synth_result = await synthesizer_agent.run(
+    async with synthesizer_agent.run_stream(
         f"{synth_context}\n\n---\n\n사용자 메시지: {user_message}",
         deps=synth_deps,
         message_history=history,
-    )
-    return synth_result.output
+    ) as stream:
+        prev_msg = ""
+        async for partial in stream.stream_output():
+            msg = getattr(partial, "message", None) or ""
+            if len(msg) > len(prev_msg):
+                yield msg[len(prev_msg):]
+                prev_msg = msg
+        yield await stream.get_output()
