@@ -385,7 +385,10 @@ async def book_flight(
     내부 동작: search_flights로 옵션 조회 → 최적 항공편 선택 → Duffel create_order 호출
     LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
 
-    - origin/destination: 영문 도시명 또는 IATA 코드. 예) "Seoul", "ICN", "Tokyo", "NRT"
+    - origin/destination: **반드시 영문 도시명**으로 전달할 것.
+      현재 여행 정보의 destination 값에서 영문명을 추출해 사용한다.
+      예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
+          "(오사카, Osaka)" → "Osaka"  |  "Osaka"처럼 영문이면 그대로 사용
     - departure_date: YYYY-MM-DD 형식
     - children >= 1이면 child_ages 개수 일치 필요. 예) children=2, child_ages=[5, 8]
     - 반환: {status: "todo"} — FlightAdapter.create_order 연결 후 실제 예약 처리 예정
@@ -408,7 +411,10 @@ async def book_hotel(
     내부 동작: search_hotels로 옵션 조회 → 최적 숙소 선택 → Duffel create_booking 호출
     LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
 
-    - city_name: 영문 또는 한글 도시명. 예) "Tokyo", "도쿄"
+    - city_name: **반드시 영문 도시명**으로 전달할 것.
+      현재 여행 정보의 destination 값에서 영문명을 추출해 사용한다.
+      예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
+          "(오사카, Osaka)" → "Osaka"  |  "방콕" → "Bangkok"
     - check_in/check_out: YYYY-MM-DD 형식
     - children >= 1이면 child_ages 개수 일치 필요. 예) children=1, child_ages=[7]
     - 반환: {status: "todo"} — AccommodationAdapter.create_booking 연결 후 실제 예약 처리 예정

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -38,6 +39,33 @@ _service = TravelAgentService({
 })
 
 _DEFAULT_ORIGIN = "Seoul"
+
+
+async def _extract_english_city(raw: str) -> str:
+    """
+    DB에 저장된 도시명에서 영문명을 추출한다.
+
+    처리 순서:
+    1. 괄호 제거 후 쉼표·슬래시로 분리 → 영문 토큰이 있으면 바로 반환
+       예) "인천, incheon"  → "incheon"
+           "(서울, Seoul)"  → "Seoul"
+           "Tokyo"          → "Tokyo"
+    2. 영문 토큰이 없으면(순수 한국어) preprocessor_agent로 번역
+       예) "도쿄" → "Tokyo", "오사카" → "Osaka"
+    """
+    clean = re.sub(r"[()（）]", " ", raw).strip()
+    for part in re.split(r"[,、/\\]", clean):
+        part = part.strip()
+        if part and re.match(r"^[A-Za-z][A-Za-z\s\-]*$", part):
+            return part
+    # 순수 한국어 → LLM 번역
+    result = await preprocessor_agent.run(
+        "도시명을 영문으로만 답해줘. 영문 도시명 외 다른 텍스트는 출력하지 마.\n"
+        "Island, City, Province 같은 지역 접미사는 붙이지 말고 도시명만 짧게 반환.\n"
+        "예) '서울' → Seoul  |  '도쿄' → Tokyo  |  '제주도' → Jeju  |  '방콕' → Bangkok  |  '오사카' → Osaka\n"
+        f"입력: {raw}"
+    )
+    return result.data.strip()
 
 
 # ── Phase 2 플래너 출력 스키마 ───────────────────────────────────────────
@@ -443,7 +471,7 @@ async def _fetch_flights(
     destination: str, start_date: str, end_date: str,
     adults: int, children: int, child_ages: list,
 ) -> tuple[dict, dict]:
-    city = destination.split(",")[0].strip()
+    city = await _extract_english_city(destination)
     depart, ret = await asyncio.gather(
         _service.process_task("duffel_flight", "search_flights", {
             "origin": _DEFAULT_ORIGIN, "destination": city,
@@ -468,7 +496,7 @@ async def _fetch_hotels(
     destination: str, start_date: str, end_date: str,
     adults: int, children: int, child_ages: list,
 ) -> dict:
-    city = destination.split(",")[0].strip()
+    city = await _extract_english_city(destination)
     try:
         return await _service.process_task("duffel_accommodation", "search_hotels", {
             "city_name": city,

@@ -27,19 +27,23 @@ class AccommodationAdapter(ApiTools):
         headers = self._get_headers()
         params = {"query": query}
 
+        print(f"\n[AccommodationAdapter] Places Suggestions 요청: query='{query}'")
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 response = await client.get(url, headers=headers, params=params)
-                
+                print(f"[AccommodationAdapter] Places Suggestions HTTP Status: {response.status_code}")
+
                 if response.status_code != 200:
+                    print(f"[AccommodationAdapter] Places Suggestions 실패: {response.text[:200]}")
                     return None
-                
+
                 data = response.json()
                 suggestions = data.get("data", [])
                 
+                print(f"[AccommodationAdapter] Places Suggestions 결과: {len(suggestions)}건")
                 if not suggestions:
                     return None
-                
+
                 # 1. 도시(city) 타입의 제안을 우선적으로 찾음
                 for suggestion in suggestions:
                     if suggestion.get("type") == "city":
@@ -47,31 +51,33 @@ class AccommodationAdapter(ApiTools):
                         lat = suggestion.get("latitude")
                         lon = suggestion.get("longitude")
                         if lat is not None and lon is not None:
+                            print(f"[AccommodationAdapter] 좌표 확정 (city): ({lat}, {lon})")
                             return lat, lon
-                        
+
                         # 도시 좌표가 없다면 포함된 공항들 중 최적의 공항 선택
                         airports = suggestion.get("airports", [])
                         if airports:
-                            # 지능형 필터링: 제안된 도시 이름과 공항의 city_name이 일치하는 공항을 우선 선택
-                            # 예: Tokyo 검색 시 Yokota(Fussa) 대신 Haneda(Tokyo) 선택 유도
                             target_city = suggestion.get("name")
                             matching_airports = [a for a in airports if a.get("city_name") == target_city]
-                            
                             best_airport = matching_airports[0] if matching_airports else airports[0]
                             lat = best_airport.get("latitude")
                             lon = best_airport.get("longitude")
                             if lat is not None and lon is not None:
+                                print(f"[AccommodationAdapter] 좌표 확정 (airport {best_airport.get('iata_code')}): ({lat}, {lon})")
                                 return lat, lon
-                
+
                 # 2. 도시 타입이 없거나 좌표를 못 찾은 경우, 다른 제안들 중 좌표가 있는 첫 번째 항목 사용
                 for suggestion in suggestions:
                     lat = suggestion.get("latitude")
                     lon = suggestion.get("longitude")
                     if lat is not None and lon is not None:
+                        print(f"[AccommodationAdapter] 좌표 확정 (fallback): ({lat}, {lon})")
                         return lat, lon
-                
+
+                print(f"[AccommodationAdapter] 좌표 추출 실패: suggestions에 좌표 없음")
                 return None
-            except Exception:
+            except Exception as e:
+                print(f"[AccommodationAdapter] Places Suggestions 예외: {e}")
                 return None
 
     async def execute(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -130,9 +136,13 @@ class AccommodationAdapter(ApiTools):
                 }
             }
 
+            print(f"\n[AccommodationAdapter] search_hotels 요청")
+            print(f"  city_query={city_query!r} → 좌표=({lat}, {lon})")
+            print(f"  check_in={check_in}, check_out={check_out}, guests={guests}, rooms={params.get('rooms', 1)}")
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, headers=self._get_headers(), json=payload)
-                
+                print(f"[AccommodationAdapter] search_hotels HTTP Status: {response.status_code}")
+
                 # JSONDecodeError 방지를 위한 예외 처리
                 try:
                     data = response.json()
@@ -144,10 +154,12 @@ class AccommodationAdapter(ApiTools):
                 
                 # 성공 응답 코드는 200 또는 201
                 if response.status_code not in [200, 201]:
+                    print(f"[AccommodationAdapter] search_hotels 오류: {data.get('errors')}")
                     return {"status": "error", "message": data.get("errors")}
 
                 # 4. 결과 데이터 정제
                 raw_results = data.get("data", {}).get("results", [])
+                print(f"[AccommodationAdapter] search_hotels 결과: {len(raw_results)}개 hotels")
                 
                 if not raw_results:
                     return {
