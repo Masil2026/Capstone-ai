@@ -187,15 +187,16 @@ class AccommodationAdapter(ApiTools):
                     if isinstance(chain_info, dict):
                         chain_name = chain_info.get("name", "Independent")
 
-                    orig_amount = float(res.get("cheapest_rate_total_amount") or 0)
+                    raw_amount = res.get("cheapest_rate_total_amount")
+                    orig_amount = float(raw_amount) if raw_amount else None
                     orig_currency = res.get("cheapest_rate_currency", "USD")
-                    price_krw = await to_krw(orig_amount, orig_currency)
+                    price_krw = await to_krw(orig_amount, orig_currency) if orig_amount else None
                     processed_hotels.append({
                         "hotel_id": hotel.get("id"),
                         "name": hotel.get("name"),
-                        "price_original": orig_amount,   # 현지 통화 1박 금액
-                        "currency": orig_currency,        # 현지 통화 코드
-                        "price_krw": price_krw,           # 한화 환산 1박 금액
+                        "price_original": orig_amount,   # 현지 통화 1박 금액 (없으면 None)
+                        "currency": orig_currency,
+                        "price_krw": price_krw,           # 한화 환산 1박 금액 (없으면 None)
                         "rating": hotel.get("rating"),
                         "address": address_str,
                         "chain": chain_name

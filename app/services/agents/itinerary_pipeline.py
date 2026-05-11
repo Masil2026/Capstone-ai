@@ -88,9 +88,9 @@ class SelectedHotel(BaseModel):
     address: str
     check_in: str           # YYYY-MM-DD
     check_out: str
-    price_original: float
+    price_original: float | None = None
     currency: str
-    price_krw: int
+    price_krw: int | None = None
     rating: float | None = None
 
 class DaySchedule(BaseModel):
@@ -164,10 +164,14 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "당신은 여행 일정 플래너입니다.",
         f"여행지: {dest} | 기간: {start} ~ {end} ({total_days}일) | 오늘: {d.today}",
         f"인원: 성인 {adults}명, 어린이 {child_str} | 총 예산: {budget_str}",
+        "출발지: 대한민국 — 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다.",
         "",
         "## 역할",
         "아래 데이터를 바탕으로 3가지를 결정하고 PlannerOutput을 반환하라:",
         "1. selected_flights: 출발편·귀국편 각 1개 선택 (direction='depart'/'return')",
+        "   - 출발편(depart): 한국(ICN/GMP) → 여행지 방향 항공편",
+        "   - 귀국편(return): 여행지 → 한국(ICN/GMP) 방향 항공편",
+        "   - ## 항공편 데이터의 origin·destination 값으로 방향을 확인할 것",
         "2. selected_hotels: 예산에 맞는 숙소 1개 선택",
         "3. days: ordered_queries (방문 순서대로 장소 검색어 목록)",
         "   - 기존 일정이 없으면: 전체 날짜에 대해 작성",
@@ -178,7 +182,7 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "- 하루 총 7~10개 항목 (관광지 3~5개 + 식사 3개)",
         "- 같은 지역 거점 내 장소끼리 묶어 이동 최소화",
         "- 비 예보(강수확률 50% 이상): 실내 관광지 우선",
-        "- 1일차(신규): 출발편 도착 시간 이후부터 일정 시작",
+        "- 1일차(신규): 출발편 도착 시간 이후부터 일정 시작 (항공 이동 항목 제외)",
         "- 마지막 날(신규): 귀국편 탑승 2~3시간 전까지 일정 종료",
         "- 검색어 형식: '장소명 도시명 (영문)' — Google Maps 검색에 사용",
         "  예) 'Senso-ji Temple Asakusa Tokyo', 'tonkotsu ramen Shinjuku Tokyo lunch'",
@@ -293,6 +297,16 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "플래너가 확정한 항공·숙소·방문 순서와 장소 검색·동선 데이터를 바탕으로",
         "완전한 OrchestratorResult를 작성하라.",
         "",
+        "## 여행 기본 전제 (항상 준수)",
+        f"- 이 여행의 출발지는 대한민국이다. 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다.",
+        f"- 여행지: {dest}",
+        "- 1일차 첫 항목: 한국 공항에서 목적지로 출발하는 항공 이동 항목 (## 선택된 항공편의 depart 편 사용)",
+        "  예) plan_name='인천국제공항(ICN) → 도쿄 나리타(NRT) 항공 이동 (항공사명)', time='출발시간 ~ 도착시간'",
+        "- 마지막날 마지막 항목: 목적지에서 한국 공항으로 귀국하는 항공 이동 항목 (## 선택된 항공편의 return 편 사용)",
+        "  예) plan_name='도쿄 나리타(NRT) → 인천국제공항(ICN) 귀국 항공 (항공사명)', time='출발시간 ~ 도착시간'",
+        "- 항공 이동 항목 직전에는 공항 이동 항목 삽입 (출발 2~3시간 전 출발 기준)",
+        "  예) plan_name='숙소 → 인천국제공항 이동 (공항버스/택시)'",
+        "",
         "## 필수 출력",
         "- `message`: 아래 기준으로 작성한다.",
         "  - 기존 일정(## 기존 일정)이 없으면 신규 생성: 날짜별 주요 코스를 간략히 소개한다.",
@@ -327,19 +341,35 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         '출력 예시 (사용자가 "참치회랑 규카츠 먹고 싶어"라고 했을 때): {"food": ["참치회", "규카츠"]}',
         "",
         "## day_plans 각 항목 형식",
-        '{"plan_name":"...", "time":"HH:MM ~ HH:MM", "place":"...", "note":"...", "cost":null 또는 {"amount":숫자,"currency":"코드"}}',
+        '{"plan_name":"...", "time":"HH:MM ~ HH:MM", "place":"...", "note":"...", "cost":null 또는 {"amount":숫자,"currency":"코드","amount_krw":정수또는null}}',
         "",
-        "## 시간 배분",
-        "- 식사 3회: 아침(08:00~09:00), 점심(12:00~13:30), 저녁(18:30~20:00)",
-        "- 이동 5분 이상: 별도 이동 항목 삽입",
-        "- plan_name: '{출발} → {도착} 이동 ({수단)'",
+        "## 식사 배치 규칙",
+        "- 일반 날: 아침(08:00~09:00), 점심(12:00~13:30), 저녁(18:30~20:00) 3회 포함",
+        "- 항공 도착 날 (1일차 신규 생성): 도착 시간 + 시내 이동(약 1.5h) 이후부터 가능한 첫 식사부터 시작",
+        "  예) 도착 11:27 → 시내 이동 13:00 완료 → 점심부터 시작 (아침 생략)",
+        "      도착 14:30 → 시내 이동 16:00 완료 → 저녁 1회만",
+        "      도착 07:00 → 시내 이동 08:30 완료 → 아침부터 3회 정상 배치",
+        "- 항공 출발 날 (마지막 날 신규 생성): 탑승 시간 2~3시간 전까지 일정 종료, 그 이후 식사 생략",
+        "  예) 탑승 18:00 → 15:00 전까지 → 아침·점심 후 종료 (저녁 생략)",
+        "      탑승 09:00 → 06:00 전까지 → 아침 간단히 후 공항 이동",
+        "- 이동 5분 이상: 별도 이동 항목 삽입 (plan_name: '{출발} → {도착} 이동 ({수단})')",
         "- 비 예보 날: 실내 위주 배치 후 note에 날씨 안내",
         "",
         "## cost 작성 규칙",
-        "- 항공·숙소(API 데이터): {amount:가격, currency:통화코드, amount_krw:한화정수}",
-        "- 식사·교통·입장료(현지 물가): {amount:가격, currency:통화코드} — amount_krw 생략(자동 변환)",
-        "- 국내: {amount:가격, currency:'KRW'} — amount_krw=null",
-        "- 무료: cost=null",
+        "⚠️ cost=null은 진짜 무료인 경우만. 금액 모를 때도 null. 절대 0 금액 쓰지 말 것.",
+        "",
+        "- 항공 이동 항목: ## 선택된 항공편의 price_original·currency·price_krw 값을 그대로 사용",
+        '  예) price_original=450.0, currency="USD", price_krw=650000',
+        '      → cost: {"amount": 450.0, "currency": "USD", "amount_krw": 650000}',
+        "- 숙소 체크인 항목: ## 선택된 숙소의 price_krw 값 사용. price_krw가 0이면 cost=null",
+        '  예) price_krw=120000, currency="JPY", price_original=13000',
+        '      → cost: {"amount": 13000, "currency": "JPY", "amount_krw": 120000}',
+        "- 식사·교통·입장료: 현지 물가 기준 추정. amount_krw 생략(자동 환산)",
+        '  예) 일본 라멘: {"amount": 1200, "currency": "JPY"}',
+        '      도쿄 지하철: {"amount": 200, "currency": "JPY"}',
+        '      헝가리 입장료: {"amount": 3000, "currency": "HUF"}',
+        "- 국내(한국) 비용: currency='KRW', amount_krw=null",
+        "- 무료(공원·야경·산책 등): cost=null",
     ]
 
     existing_plans = info.get("day_plans")
@@ -359,9 +389,10 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
 
     lines += ["", "## 선택된 숙소"]
     for h in po.selected_hotels:
+        price_str = f"{h.price_krw:,}원" if h.price_krw else "가격정보없음"
         lines.append(
             f"- {h.city}: {h.name} | {h.address} | "
-            f"{h.check_in} ~ {h.check_out} | {h.price_krw:,}원"
+            f"{h.check_in} ~ {h.check_out} | {price_str} ({h.currency} {h.price_original})"
         )
 
     lines += ["", "## 날씨"]
