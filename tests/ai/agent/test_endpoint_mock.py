@@ -167,9 +167,13 @@ async def test_itinerary_new_all_dates_returned():
     )
     ctx = _make_ctx(day_plans=None, use_existing_memory=False)
 
+    async def _mock_pipeline_new(*_, **__):
+        yield mock_result.message
+        yield mock_result
+
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
-         patch("app.controller.aiMessageController.run_itinerary_pipeline", new=AsyncMock(return_value=mock_result)), \
+         patch("app.controller.aiMessageController.run_itinerary_pipeline", new=_mock_pipeline_new), \
          patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
          patch("app.controller.aiMessageController.save_memory") as mock_save, \
          patch("app.services.adapters.currency_converter.to_krw", new=AsyncMock(return_value=10000)):
@@ -220,9 +224,13 @@ async def test_itinerary_modify_only_modified_date_returned():
     )
     ctx = _make_ctx()  # 기존 전체 일정 포함
 
+    async def _mock_pipeline_modify(*_, **__):
+        yield mock_result.message
+        yield mock_result
+
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
-         patch("app.controller.aiMessageController.run_itinerary_pipeline", new=AsyncMock(return_value=mock_result)), \
+         patch("app.controller.aiMessageController.run_itinerary_pipeline", new=_mock_pipeline_modify), \
          patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
          patch("app.controller.aiMessageController.save_memory") as mock_save, \
          patch("app.services.adapters.currency_converter.to_krw", new=AsyncMock(return_value=10000)):

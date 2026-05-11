@@ -134,62 +134,54 @@ result = await service.process_task("duffel_flight", "search_flights", params={.
 
 ---
 
-## pydantic-ai Agent 결과값
+## pydantic-ai Agent 결과값 (v1.x 기준)
 
-`agent.run()` 결과는 `result.data`로 참조한다. `result.output`은 이 버전(0.0.54)에 존재하지 않는다.
+`agent.run()` 결과는 `result.output`으로 참조한다. v0.6.0에서 `result.data`가 제거되었다.
 
 ```python
 result = await agent.run("입력")
-answer = result.data          # ✅ 올바름
-answer = result.output        # ❌ AttributeError 발생
+answer = result.output        # ✅ 올바름 (v0.6.0+)
+answer = result.data          # ❌ AttributeError (v0.6.0+에서 제거됨)
 
 # 대화 히스토리 누적
 history = result.all_messages()
 result2 = await agent.run("다음 입력", message_history=history)
 ```
 
-## pydantic-ai 동적 컨텍스트 주입 — 0.0.54 버그 우회
+Agent 생성자도 v0.6.0부터 `result_type` → `output_type`으로 변경되었다.
+
+```python
+agent = Agent(
+    model=...,
+    deps_type=MyDeps,
+    output_type=MyOutput,    # ✅ v0.6.0+ (result_type은 deprecated)
+    system_prompt="...",
+)
+```
+
+## pydantic-ai 동적 컨텍스트 주입
 
 **`@agent.system_prompt` + `RunContext` 패턴은 사용하지 않는다.**
 
-pydantic-ai 0.0.54에서 `@agent.system_prompt`에 `RunContext`를 받는 함수를 등록하면,
-`async def`든 `def`든 `agent.run()` 시점에 **조용히 호출되지 않는 버그**가 있다.
-오류도 없이 시스템 프롬프트 함수가 무시되어 LLM이 컨텍스트 없이 응답한다.
-
-```python
-# ❌ 하지 말 것 — 0.0.54에서 호출되지 않음
-@agent.system_prompt
-async def build_prompt(ctx: RunContext[MyDeps]) -> str:
-    return f"컨텍스트: {ctx.deps.something}"   # LLM에 전달되지 않음
-
-# ❌ def로 바꿔도 마찬가지
-@agent.system_prompt
-def build_prompt(ctx: RunContext[MyDeps]) -> str:
-    return f"컨텍스트: {ctx.deps.something}"   # 여전히 호출되지 않음
-```
-
-**올바른 패턴**: 컨텍스트 블록을 일반 함수로 생성하고 `agent.run()` 직전에 user_message 앞에 붙인다.
+동적 컨텍스트는 일반 함수로 생성하고 `agent.run()` 직전에 user_message 앞에 붙인다.
 
 ```python
 # ✅ 올바른 패턴
 agent = Agent(
     model=...,
     deps_type=MyDeps,
-    result_type=MyOutput,
-    system_prompt="역할 설명 (정적 문자열만)",  # 동적 데이터 없음
+    output_type=MyOutput,
+    system_prompt="역할 설명 (정적 문자열만)",
 )
 
 def build_context_prompt(deps: MyDeps) -> str:
-    """동적 컨텍스트 블록 생성 — agent.run() 직전에 호출"""
     sections = []
     if deps.current_itinerary:
         sections.append(f"## 현재 여행 정보\n- 여행지: {deps.current_itinerary['destination']}")
     if deps.ai_summary:
         sections.append(f"## 이전 대화 요약\n{deps.ai_summary}")
-    # ...
     return "\n\n".join(sections)
 
-# 호출 시
 context_block = build_context_prompt(deps)
 result = await agent.run(
     f"{context_block}\n\n---\n\n사용자 메시지: {user_message}",
@@ -198,33 +190,31 @@ result = await agent.run(
 )
 ```
 
-`RunContext` 없이 deps를 받지 않는 단순 함수는 `@agent.system_prompt`로 등록해도 동작한다.
-단, 동적 데이터가 필요하면 반드시 위 패턴을 사용한다.
-
 ## pydantic-ai 스트리밍 (SSE용)
 
-`agent.run_stream()`은 비동기 컨텍스트 매니저로 사용한다. 스트리밍 완료 후 `result.data`로 전체 응답을 얻는다.
+### 구조화 출력 실시간 스트리밍 (output_type 지정 에이전트)
+
+`run_stream()` + `stream_output()`으로 partial 객체를 토큰 단위로 수신한다.
+`message` 필드가 `OrchestratorResult`의 첫 번째 필드여야 가장 먼저 스트리밍된다.
 
 ```python
-from fastapi.responses import StreamingResponse
-import json
-
-async def _stream():
-    async with agent.run_stream("입력", message_history=history) as result:
-        async for chunk in result.stream_text(delta=True):  # delta=True: 증분 텍스트만
-            yield f"event: chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
-        full_response = result.data   # 스트리밍 완료 후 전체 텍스트
-
-return StreamingResponse(_stream(), media_type="text/event-stream")
+async with agent.run_stream(prompt, deps=deps, message_history=history) as stream_result:
+    prev_msg = ""
+    async for partial in stream_result.stream_output():
+        msg = getattr(partial, "message", None) or ""
+        if len(msg) > len(prev_msg):
+            yield _sse("chunk", {"content": msg[len(prev_msg):]})
+            prev_msg = msg
+    orch_result = await stream_result.get_output()  # 완성된 전체 객체
 ```
 
-`result_type`이 지정된 에이전트는 `run_stream` 대신 `run`을 사용한다.
-구조화 출력은 스트리밍이 아닌 단일 호출로 처리한다.
+### 텍스트 출력 스트리밍 (output_type 없는 에이전트)
 
 ```python
-# classification_agent, orchestrator_agent — result_type 지정된 경우
-result = await agent.run("분류할 텍스트")
-output = result.data   # 구조화 Pydantic 객체
+async with agent.run_stream("입력", message_history=history) as result:
+    async for chunk in result.stream_text(delta=True):
+        yield f"event: chunk\ndata: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+    full_response = await result.get_output()
 ```
 
 ---

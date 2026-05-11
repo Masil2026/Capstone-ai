@@ -28,6 +28,7 @@ class OrchestratorDeps:
     similar_messages: list[dict]    # pgvector 유사 과거 메시지 최대 5개
     current_itinerary: dict | None  # 현재 여행 일정 (DB read-only)
     request_type: str               # classification_agent 판별 결과
+    reservations: list[dict]        # 채팅방의 활성 예약 목록 (DB read-only)
 
 # ---------------------------------------------------------------------------
 # 오케스트레이터 에이전트
@@ -36,7 +37,7 @@ class OrchestratorDeps:
 orchestrator_agent = Agent(
     model=_build_model("orchestrator"),
     deps_type=OrchestratorDeps,
-    result_type=OrchestratorResult,
+    output_type=OrchestratorResult,
     system_prompt=(
         "당신은 여행 계획 전문 AI 어시스턴트입니다.\n"
         "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다."
@@ -89,36 +90,39 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 ## 이번 요청: 예약 (reservation)
 
 **[응답 형식 — 반드시 준수]**
-반환 JSON의 필드를 아래와 같이 채워야 한다:
 - `reservation.reservation_type`: "flight" 또는 "hotel"
-- `reservation.detail`: **반드시 JSON 객체(dict)로 작성한다. 문자열 금지.**
-  숙소 예시: {"name": "신주쿠 그랜드 호텔", "check_in": "2026-05-01", "check_out": "2026-05-03", "rooms": 1}
-  항공 예시: {"airline": "대한항공", "flight_no": "KE705", "departure": "ICN", "arrival": "NRT", "date": "2026-05-01"}
-- `reservation.total_price`: 숫자 (소수점 허용)
-- `reservation.currency`: 통화 코드 (예: "KRW")
-- `message`: 예약 결과를 간략히 요약한다. 숙소명·항공편명·예약 번호·날짜·금액 등 핵심 정보를 포함한다.
-  예) "신주쿠 그랜드 호텔 5월 1일~3일(2박) 예약이 완료되었습니다. 약 번호: HTL-20260501-0042 / 총 요금: 320,000원"
-  예) "대한항공 KE705 (인천→나리타, 5월 1일 10:00) 예약이 완료되었습니다. 예약 번호: KE-20260501-7823 / 총 요금: 450,000원"
+- `reservation.detail`: **반드시 JSON 객체(dict). 문자열 금지.**
+  숙소: {"name":"숙소명", "check_in":"YYYY-MM-DD", "check_out":"YYYY-MM-DD", "rooms":1, "guests":인원수}
+  항공: {"airline":"항공사명", "departure":"출발IATA", "arrival":"도착IATA", "departing_at":"ISO8601", "arriving_at":"ISO8601", "stops":0}
+- `reservation.total_price`: 숫자 (현지 통화 기준)
+- `reservation.currency`: 통화 코드 (예: "EUR", "JPY", "USD")
+- `reservation.external_ref_id`: 예약번호를 직접 생성. 형식: 숙소는 HTL-YYYYMMDD-XXXXXX, 항공은 FLT-YYYYMMDD-XXXXXX (X는 대문자+숫자 6자리).
+  예) "HTL-20260510-A3K9PQ", "FLT-20260601-B7XM2R"
+- `reservation.booking_url`: 예약 확인 URL을 직접 생성. 형식: https://booking.tripai.app/{stays 또는 flights}/{external_ref_id}
+  예) "https://booking.tripai.app/stays/HTL-20260510-A3K9PQ"
+- `reservation.reserved_at`: 현재 시각 ISO 8601. 예) "2026-05-11T14:30:00+09:00"
+- `message`: 예약 완료 안내. 숙소명/항공편 + 날짜 + 예약번호 + 금액 + 예약 URL 포함.
+  예) "Mystery Hotel Budapest 5월 10일~14일(4박) 예약이 완료되었습니다. 예약번호: HTL-20260510-A3K9PQ / 총 요금: 600.0 EUR (약 876,000원)\n예약 확인: https://booking.tripai.app/stays/HTL-20260510-A3K9PQ"
 
 처리:
-1. 항공권이면 book_flight, 숙소이면 book_hotel을 호출한다.
-   (현재 미구현 — status: todo 반환. 향후 Duffel booking API 연결 예정)
-2. 결과를 reservation 필드에 작성한다.""",
+1. 사용자가 요청한 숙소/항공편 정보를 현재 여행 일정 및 대화 맥락에서 파악한다.
+2. 위 모든 필드를 직접 생성하여 reservation 필드에 작성한다.""",
 
     "cancel": """\
 ## 이번 요청: 예약 취소 (cancel)
 
 **[응답 형식 — 반드시 준수]**
-반환 JSON의 필드를 아래와 같이 채워야 한다:
-- `cancel`: 취소 정보 (reservation_id, cancelled_at)
-- `message`: 어떤 예약이 취소되었는지 핵심 정보를 포함해 안내한다. 숙소명·항공편명·예약 번호를 명시한다.
-  예) "신주쿠 그랜드 호텔 예약(예약 번호: HTL-20260501-0042)이 취소되었습니다."
-  예) "대한항공 KE705편 예약(예약 번호: KE-20260501-7823)이 취소 처리되었습니다."
+- `cancel.reservation_id`: **반드시 ## 활성 예약 목록의 id(UUID) 값 그대로 사용. 직접 생성 금지.**
+- `cancel.cancelled_at`: 현재 시각 ISO 8601 (예: "2026-05-11T14:30:00+09:00")
+- `message`: 취소 결과를 안내한다.
 
 처리:
-1. 항공권이면 cancel_flight, 숙소이면 cancel_hotel을 호출한다.
-   (현재 미구현 — status: todo 반환. 향후 Duffel cancel API 연결 예정)
-2. 결과를 cancel 필드에 작성한다.""",
+1. ## 활성 예약 목록에서 사용자가 취소하려는 예약을 찾는다.
+2. 일치하는 예약이 있으면 → 해당 id(UUID)를 cancel.reservation_id에 그대로 입력하고, 취소 완료 message 작성.
+   예) "Mystery Hotel Budapest(예약번호: HTL-20260510-A3K9PQ) 예약이 취소 처리되었습니다."
+3. 활성 예약 목록이 비어있거나 일치하는 예약이 없으면 → cancel 필드를 null로 두고,
+   message에 취소할 예약을 찾지 못했음을 안내한다.
+   예) "취소할 예약 내역을 찾지 못했습니다. 현재 활성화된 예약이 없거나 요청하신 예약과 일치하는 항목이 없습니다." """,
 
     "chat": """\
 ## 이번 요청: 일반 대화/질문 (chat)
@@ -186,6 +190,7 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
         f"  ai_summary       : {deps.ai_summary}\n"
         f"  preferences      : {deps.preferences}\n"
         f"  similar_messages : {len(deps.similar_messages)}건\n"
+        f"  reservations     : {len(deps.reservations)}건\n"
         f"  current_itinerary: "
         f"{({k: v for k, v in deps.current_itinerary.items() if k != 'day_plans'} if deps.current_itinerary else None)}",
         flush=True,
@@ -234,6 +239,20 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
     if deps.similar_messages:
         msgs = "\n".join(f"[{m['role']}] {m['content']}" for m in deps.similar_messages)
         sections.append(f"## 참고할 과거 대화\n{msgs}")
+
+    if deps.reservations:
+        lines = ["## 활성 예약 목록 (취소 요청 시 아래 id를 그대로 사용할 것)"]
+        for r in deps.reservations:
+            detail = r.get("detail") or {}
+            name = detail.get("name") or detail.get("airline") or "알 수 없음"
+            price_str = f"{r['total_price']} {r['currency']}" if r.get("total_price") else "가격정보없음"
+            lines.append(
+                f"- id={r['id']} | type={r['type']} | {name} | "
+                f"external_ref_id={r.get('external_ref_id') or '없음'} | {price_str}"
+            )
+        sections.append("\n".join(lines))
+    elif deps.request_type == "cancel":
+        sections.append("## 활성 예약 목록\n취소할 수 있는 예약이 없습니다.")
 
     sections.append(_TYPE_INSTRUCTIONS.get(deps.request_type, _TYPE_INSTRUCTIONS["chat"]))
     sections.append(_MEMORY_INSTRUCTION)
@@ -286,7 +305,7 @@ async def search_web(
     result = await preprocessor_agent.run(
         f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.\n\n{snippets}"
     )
-    return {"status": "success", "summary": result.data, "source_count": len(filtered)}
+    return {"status": "success", "summary": result.output, "source_count": len(filtered)}
 
 
 @orchestrator_agent.tool_plain
@@ -385,7 +404,10 @@ async def book_flight(
     내부 동작: search_flights로 옵션 조회 → 최적 항공편 선택 → Duffel create_order 호출
     LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
 
-    - origin/destination: 영문 도시명 또는 IATA 코드. 예) "Seoul", "ICN", "Tokyo", "NRT"
+    - origin/destination: **반드시 영문 도시명**으로 전달할 것.
+      현재 여행 정보의 destination 값에서 영문명을 추출해 사용한다.
+      예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
+          "(오사카, Osaka)" → "Osaka"  |  "Osaka"처럼 영문이면 그대로 사용
     - departure_date: YYYY-MM-DD 형식
     - children >= 1이면 child_ages 개수 일치 필요. 예) children=2, child_ages=[5, 8]
     - 반환: {status: "todo"} — FlightAdapter.create_order 연결 후 실제 예약 처리 예정
@@ -408,7 +430,10 @@ async def book_hotel(
     내부 동작: search_hotels로 옵션 조회 → 최적 숙소 선택 → Duffel create_booking 호출
     LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
 
-    - city_name: 영문 또는 한글 도시명. 예) "Tokyo", "도쿄"
+    - city_name: **반드시 영문 도시명**으로 전달할 것.
+      현재 여행 정보의 destination 값에서 영문명을 추출해 사용한다.
+      예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
+          "(오사카, Osaka)" → "Osaka"  |  "방콕" → "Bangkok"
     - check_in/check_out: YYYY-MM-DD 형식
     - children >= 1이면 child_ages 개수 일치 필요. 예) children=1, child_ages=[7]
     - 반환: {status: "todo"} — AccommodationAdapter.create_booking 연결 후 실제 예약 처리 예정

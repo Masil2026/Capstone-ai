@@ -80,6 +80,7 @@ def _make_deps(request_type: str) -> OrchestratorDeps:
         similar_messages=[],
         current_itinerary=_EXISTING_ITINERARY,
         request_type=request_type,
+        reservations=[],
     )
 
 
@@ -138,7 +139,7 @@ async def rate_limit_guard():
 def mock_tools():
     """외부 API 호출 Mock — LLM 호출은 실제로 수행"""
     preprocessor_result = MagicMock()
-    preprocessor_result.data = "도쿄 관광 핵심 정보 요약 (mock)"
+    preprocessor_result.output = "도쿄 관광 핵심 정보 요약 (mock)"
     with patch.object(_orch._service, "process_task", side_effect=AsyncMock(side_effect=_mock_process_task)), \
          patch.object(_orch.preprocessor_agent, "run", new=AsyncMock(return_value=preprocessor_result)):
         yield
@@ -165,7 +166,7 @@ async def test_modify_returns_only_requested_date(mock_tools):
     """기존 4일 일정 중 2일차만 수정 → day_plans에 2026-05-16만 반환"""
     deps = _make_deps("itinerary")
     result = await _run_agent(deps, "2일차 점심을 규카츠 식당으로 바꿔줘.")
-    data = result.data
+    data = result.output
     _print_result("modify_only_2일차", data)
 
     assert data.day_plans is not None, "day_plans가 null"
@@ -185,7 +186,7 @@ async def test_ai_summary_accumulated_after_modify(mock_tools):
     """기존 ai_summary(1·2번)에 이번 변경이 3번으로 누적됐는지 검증"""
     deps = _make_deps("itinerary")
     result = await _run_agent(deps, "3일차 하라주쿠 대신 우에노 공원으로 바꿔줘.")
-    data = result.data
+    data = result.output
     _print_result("ai_summary_accumulated", data)
 
     assert data.ai_summary is not None, "ai_summary가 null"
@@ -201,7 +202,7 @@ async def test_preferences_merged_with_existing(mock_tools):
     """기존 preferences(참치회·라멘)에 새 취향(규카츠)이 병합됐는지 검증"""
     deps = _make_deps("itinerary")
     result = await _run_agent(deps, "나 규카츠 정말 좋아하거든. 2일차 점심을 규카츠 식당으로 바꿔줘.")
-    data = result.data
+    data = result.output
     _print_result("preferences_merged", data)
 
     assert data.preferences is not None
@@ -218,7 +219,7 @@ async def test_chat_references_existing_itinerary(mock_tools):
     """chat: 현재 일정 질문 → day_plans=null, 기존 일정 내용 참고 응답"""
     deps = _make_deps("chat")
     result = await _run_agent(deps, "지금 2일차에 뭐 할 예정이야?")
-    data = result.data
+    data = result.output
     _print_result("chat_itinerary_question", data)
 
     assert data.day_plans is None, "chat 타입에서 day_plans는 null이어야 함"

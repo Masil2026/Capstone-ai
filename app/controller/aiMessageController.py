@@ -107,7 +107,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     # [2] 타입 판별
     try:
         cls_result = await classification_agent.run(user_message)
-        request_type = cls_result.data.type
+        request_type = cls_result.output.type
     except Exception:
         request_type = "chat"
 
@@ -119,6 +119,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         similar_messages=ctx["similar_messages"],
         current_itinerary=ctx["current_itinerary"],
         request_type=request_type,
+        reservations=ctx.get("reservations", []),
     )
     print(
         f"\n[_stream] OrchestratorDeps 조립 완료"
@@ -129,31 +130,46 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         f"\n  current_itinerary: {({k: v for k, v in deps.current_itinerary.items() if k != 'day_plans'} if deps.current_itinerary else None)}",
         flush=True,
     )
-    # [4] 에이전트 실행 — itinerary는 파이프라인, 그 외는 오케스트레이터
+    # [4] 에이전트 실행 — itinerary는 파이프라인, 그 외는 오케스트레이터 실시간 스트리밍
     print(f"\n[_stream] [4] 에이전트 실행 시작. request_type={request_type}", flush=True)
     try:
         context_block = build_context_prompt(deps)
+        prompt = f"{context_block}\n\n---\n\n사용자 메시지: {user_message}"
 
         if request_type == "itinerary":
             print("[_stream] run_itinerary_pipeline 호출", flush=True)
-            orch_result = await run_itinerary_pipeline(deps, user_message, ctx["history"])
+            orch_result = None
+            async for item in run_itinerary_pipeline(deps, user_message, ctx["history"]):
+                if isinstance(item, str):
+                    yield _sse("chunk", {"content": item})
+                else:
+                    orch_result = item
+
             if orch_result is None:
-                print("[_stream] pipeline None → orchestrator 폴백", flush=True)
-                run_result = await orchestrator_agent.run(
-                    f"{context_block}\n\n---\n\n사용자 메시지: {user_message}",
-                    deps=deps,
-                    message_history=ctx["history"],
-                )
-                orch_result = run_result.data
+                print("[_stream] pipeline None → orchestrator 스트리밍 폴백", flush=True)
+                async with orchestrator_agent.run_stream(
+                    prompt, deps=deps, message_history=ctx["history"]
+                ) as stream_result:
+                    prev_msg = ""
+                    async for partial in stream_result.stream_output():
+                        msg = getattr(partial, "message", None) or ""
+                        if len(msg) > len(prev_msg):
+                            yield _sse("chunk", {"content": msg[len(prev_msg):]})
+                            prev_msg = msg
+                    orch_result = await stream_result.get_output()
         else:
-            print("[_stream] orchestrator_agent.run() 호출", flush=True)
-            run_result = await orchestrator_agent.run(
-                f"{context_block}\n\n---\n\n사용자 메시지: {user_message}",
-                deps=deps,
-                message_history=ctx["history"],
-            )
-            print(f"[_stream] orchestrator_agent.run() 완료. message={run_result.data.message[:80]!r}", flush=True)
-            orch_result = run_result.data
+            print("[_stream] orchestrator_agent.run_stream() 호출", flush=True)
+            async with orchestrator_agent.run_stream(
+                prompt, deps=deps, message_history=ctx["history"]
+            ) as stream_result:
+                prev_msg = ""
+                async for partial in stream_result.stream_output():
+                    msg = getattr(partial, "message", None) or ""
+                    if len(msg) > len(prev_msg):
+                        yield _sse("chunk", {"content": msg[len(prev_msg):]})
+                        prev_msg = msg
+                orch_result = await stream_result.get_output()
+            print(f"[_stream] 스트리밍 완료. message={orch_result.message[:80]!r}", flush=True)
 
         full_response: str = orch_result.message
 
@@ -163,8 +179,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         yield _sse("error", {"message": f"에이전트 오류: {e}"})
         return
 
-    # [5] 텍스트를 chunk 이벤트로 전송 (구조화 출력이므로 한 번에 전송)
-    yield _sse("chunk", {"content": full_response})
+    # [5] chunk 이벤트는 [4]의 스트리밍 중 실시간 전송됨
 
     # [6] day_plans cost.amount_krw 자동 변환
     if orch_result.day_plans:

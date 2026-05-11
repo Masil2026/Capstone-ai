@@ -117,6 +117,38 @@ def _to_date_str(value) -> str:
     return str(value)[:10]  # "2026-04-30T15:00:00+00:00" → "2026-04-30"
 
 
+def _query_reservations(room_id: str) -> list[dict]:
+    """채팅방의 활성 예약 목록을 조회한다 (취소되지 않은 것만)."""
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                "SELECT r.id, r.type, r.status, r.external_ref_id, r.detail, "
+                "r.total_price, r.currency, r.reserved_at "
+                "FROM reservations r "
+                "JOIN itineraries i ON r.itinerary_id = i.id "
+                "WHERE i.room_id = :room_id AND r.status != 'cancelled' "
+                "ORDER BY r.created_at DESC"
+            ),
+            {"room_id": room_id},
+        ).fetchall()
+        result = []
+        for row in rows:
+            detail = row.detail
+            if isinstance(detail, str):
+                detail = json.loads(detail)
+            result.append({
+                "id": str(row.id),
+                "type": row.type,
+                "status": row.status,
+                "external_ref_id": row.external_ref_id,
+                "detail": detail,
+                "total_price": float(row.total_price) if row.total_price else None,
+                "currency": row.currency,
+                "reserved_at": row.reserved_at.isoformat() if row.reserved_at else None,
+            })
+        return result
+
+
 def _query_current_itinerary(room_id: str) -> dict | None:
     """roomId로 현재 여행 일정 전체 조회"""
     with SessionLocal() as db:
@@ -188,9 +220,10 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     # DB 값으로 Redis 동기화 — Java 백엔드가 DB에 썼을 수 있으므로 매 요청마다 갱신 (fire-and-forget)
     asyncio.ensure_future(save_memory(room_id, db_memory["ai_summary"], db_memory["preferences"]))
 
-    # pgvector 검색 · itinerary 조회 · 대화 히스토리 병렬 실행
+    # pgvector 검색 · itinerary 조회 · 예약 목록 조회 · 대화 히스토리 병렬 실행
     similar_fut = loop.run_in_executor(None, _query_similar_messages, room_id, user_embedding)
     itinerary_fut = loop.run_in_executor(None, _query_current_itinerary, room_id)
+    reservations_fut = loop.run_in_executor(None, _query_reservations, room_id)
     history_fut = loop.run_in_executor(None, _query_recent_history, room_id)
 
     try:
@@ -205,6 +238,12 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
     except Exception:
         _log.error("current_itinerary 로드 실패", exc_info=True)
         current_itinerary = None
+
+    try:
+        reservations = await reservations_fut
+    except Exception:
+        _log.error("reservations 로드 실패", exc_info=True)
+        reservations = []
 
     try:
         history, raw_history = await history_fut
@@ -223,6 +262,7 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
         f"\n  preferences      : {db_memory['preferences']}"
         f"\n  history          : {len(history)}건"
         f"\n  similar_messages : {len(similar_messages)}건"
+        f"\n  reservations     : {len(reservations)}건"
         f"\n  current_itinerary: {({k: v for k, v in current_itinerary.items() if k != 'day_plans'} if current_itinerary else None)}",
         flush=True,
     )
@@ -234,4 +274,5 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
         "preferences": db_memory["preferences"],
         "similar_messages": similar_messages,
         "current_itinerary": current_itinerary,
+        "reservations": reservations,
     }

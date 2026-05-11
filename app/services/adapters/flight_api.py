@@ -27,21 +27,55 @@ class FlightAdapter(ApiTools):
         headers = self._get_headers()
         params = {"query": query}
 
+        print(f"\n[FlightAdapter] Places Suggestions 요청: query='{query}'")
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url, headers=headers, params=params)
-        except (httpx.TimeoutException, httpx.RequestError):
+        except httpx.TimeoutException:
+            print(f"[FlightAdapter] Places Suggestions 타임아웃: query='{query}'")
+            return None
+        except httpx.RequestError as e:
+            print(f"[FlightAdapter] Places Suggestions 요청 실패: {e}")
             return None
 
+        print(f"[FlightAdapter] Places Suggestions HTTP Status: {response.status_code}")
         try:
             data = response.json()
         except Exception:
+            print(f"[FlightAdapter] Places Suggestions JSON 파싱 실패: {response.text[:200]}")
             return None
 
         if response.status_code != 200 or not data.get("data"):
+            print(f"[FlightAdapter] Places Suggestions 결과 없음: {data}")
             return None
 
-        return data["data"][0].get("iata_code")
+        suggestions = data["data"]
+
+        # 1. 공항 타입이면 바로 반환
+        for s in suggestions:
+            if s.get("type") == "airport":
+                iata = s.get("iata_code")
+                if iata:
+                    print(f"[FlightAdapter] Places Suggestions 결과: '{query}' → IATA={iata} (airport)")
+                    return iata
+
+        # 2. 도시 타입이면 포함된 공항 중 도시명 일치 공항을 우선 반환
+        for s in suggestions:
+            if s.get("type") == "city":
+                airports = s.get("airports", [])
+                if airports:
+                    target_city = s.get("name")
+                    matching = [a for a in airports if a.get("city_name") == target_city]
+                    best = matching[0] if matching else airports[0]
+                    iata = best.get("iata_code")
+                    if iata:
+                        print(f"[FlightAdapter] Places Suggestions 결과: '{query}' → IATA={iata} (city→airport {best.get('name')})")
+                        return iata
+
+        # 3. fallback: 첫 번째 결과
+        iata = suggestions[0].get("iata_code")
+        print(f"[FlightAdapter] Places Suggestions 결과: '{query}' → IATA={iata} (fallback)")
+        return iata
 
     async def execute(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
@@ -109,15 +143,21 @@ class FlightAdapter(ApiTools):
                 }
             }
 
+            print(f"\n[FlightAdapter] search_flights 요청")
+            print(f"  origin_query={origin_query!r} → IATA={origin}")
+            print(f"  dest_query={dest_query!r}   → IATA={destination}")
+            print(f"  departure_date={departure_date}, passengers={passengers}")
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, headers=self._get_headers(), json=payload)
+                print(f"[FlightAdapter] search_flights HTTP Status: {response.status_code}")
                 data = response.json()
-                
+
                 if response.status_code != 201:
+                    print(f"[FlightAdapter] search_flights 오류: {data.get('errors')}")
                     return {"status": "error", "message": data.get("errors")}
 
                 offers = data.get("data", {}).get("offers", [])
-                
+                print(f"[FlightAdapter] search_flights 결과: {len(offers)}개 offers")
                 processed_results = []
                 for offer in offers[:10]: # 항공편 중 상위 10개만 뽑음
                     segments = offer["slices"][0]["segments"]
