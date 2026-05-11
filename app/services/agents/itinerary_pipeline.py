@@ -499,10 +499,9 @@ async def _fetch_weather(destination: str, start_date: str, end_date: str, today
 
 
 async def _fetch_flights(
-    destination: str, start_date: str, end_date: str,
+    city: str, start_date: str, end_date: str,
     adults: int, children: int, child_ages: list,
 ) -> tuple[dict, dict]:
-    city = await _extract_english_city(destination)
     depart, ret = await asyncio.gather(
         _service.process_task("duffel_flight", "search_flights", {
             "origin": _DEFAULT_ORIGIN, "destination": city,
@@ -524,10 +523,9 @@ async def _fetch_flights(
 
 
 async def _fetch_hotels(
-    destination: str, start_date: str, end_date: str,
+    city: str, start_date: str, end_date: str,
     adults: int, children: int, child_ages: list,
 ) -> dict:
-    city = await _extract_english_city(destination)
     try:
         return await _service.process_task("duffel_accommodation", "search_hotels", {
             "city_name": city,
@@ -625,12 +623,15 @@ async def run_itinerary_pipeline(
     children = itinerary.get("child_count") or 0
     child_ages = itinerary.get("child_ages") or []
 
+    # 도시명 영문 변환 — _fetch_flights·_fetch_hotels 양쪽이 재사용
+    city_en = await _extract_english_city(destination)
+
     # ── Phase 1: 병렬 데이터 수집 ──────────────────────────────────────
     web_summary, weather, (flights_depart, flights_return), hotels = await asyncio.gather(
         _fetch_web_summary(destination, deps.preferences),
         _fetch_weather(destination, start_date, end_date, deps.today),
-        _fetch_flights(destination, start_date, end_date, adults, children, child_ages),
-        _fetch_hotels(destination, start_date, end_date, adults, children, child_ages),
+        _fetch_flights(city_en, start_date, end_date, adults, children, child_ages),
+        _fetch_hotels(city_en, start_date, end_date, adults, children, child_ages),
     )
 
     # ── Phase 2: 플래너 LLM 1회 ────────────────────────────────────────
