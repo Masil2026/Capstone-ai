@@ -22,9 +22,9 @@ def _build_model(role: str):
         raise ValueError(f"알 수 없는 role: {role!r}")
 
     if provider == "openai":
-        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.models.openai import OpenAIChatModel
         from pydantic_ai.providers.openai import OpenAIProvider
-        return OpenAIModel(model_name, provider=OpenAIProvider(api_key=settings.GPT_API_KEY))
+        return OpenAIChatModel(model_name, provider=OpenAIProvider(api_key=settings.GPT_API_KEY))
 
     from pydantic_ai.models.gemini import GeminiModel
     from pydantic_ai.providers.google_gla import GoogleGLAProvider

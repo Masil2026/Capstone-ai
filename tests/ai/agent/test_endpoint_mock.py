@@ -12,6 +12,7 @@ POST /api/v1/ai-messages 엔드포인트 Mock 테스트
   pytest tests/ai/agent/test_endpoint_mock.py -s
 """
 import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -77,16 +78,9 @@ def _make_ctx(*, day_plans=None, use_existing_memory=True):
     }
 
 
-def _wrap_run_result(orch_result: OrchestratorResult):
-    """orchestrator_agent.run() 반환값 래퍼"""
-    r = MagicMock()
-    r.data = orch_result
-    return r
-
-
 def _mock_cls(request_type: str):
     r = MagicMock()
-    r.data.type = request_type
+    r.output.type = request_type
     return r
 
 
@@ -277,6 +271,16 @@ async def test_chat_memory_unchanged_save_memory_not_called():
     )
     ctx = _make_ctx()
 
+    async def _stream_output():
+        yield mock_result
+
+    @asynccontextmanager
+    async def _mock_run_stream(*_, **__):
+        m = MagicMock()
+        m.stream_output = _stream_output
+        m.get_output = AsyncMock(return_value=mock_result)
+        yield m
+
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
          patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
@@ -284,7 +288,7 @@ async def test_chat_memory_unchanged_save_memory_not_called():
          patch("app.controller.aiMessageController.save_memory") as mock_save:
 
         mock_cls_agent.run = AsyncMock(return_value=_mock_cls("chat"))
-        mock_orch.run = AsyncMock(return_value=_wrap_run_result(mock_result))
+        mock_orch.run_stream = _mock_run_stream
 
         events = await _call_endpoint("도쿄 5월 날씨 어때?")
 
