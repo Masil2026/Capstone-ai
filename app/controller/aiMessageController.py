@@ -119,6 +119,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         similar_messages=ctx["similar_messages"],
         current_itinerary=ctx["current_itinerary"],
         request_type=request_type,
+        reservations=ctx.get("reservations", []),
     )
     print(
         f"\n[_stream] OrchestratorDeps 조립 완료"
