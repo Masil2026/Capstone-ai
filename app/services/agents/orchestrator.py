@@ -37,7 +37,7 @@ class OrchestratorDeps:
 orchestrator_agent = Agent(
     model=_build_model("orchestrator"),
     deps_type=OrchestratorDeps,
-    result_type=OrchestratorResult,
+    output_type=OrchestratorResult,
     system_prompt=(
         "당신은 여행 계획 전문 AI 어시스턴트입니다.\n"
         "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다."
@@ -305,7 +305,7 @@ async def search_web(
     result = await preprocessor_agent.run(
         f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.\n\n{snippets}"
     )
-    return {"status": "success", "summary": result.data, "source_count": len(filtered)}
+    return {"status": "success", "summary": result.output, "source_count": len(filtered)}
 
 
 @orchestrator_agent.tool_plain

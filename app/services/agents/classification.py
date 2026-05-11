@@ -24,9 +24,8 @@ _SYSTEM_PROMPT = """\
 - change: "여행 날짜 5월 3일로 바꿔줘", "예산 100만원으로 늘려줘", "성인 2명으로 변경해줘" → 여행 기본 정보 변경
 """
 
-# 구조화 출력 전용 — run() 사용, run_stream() 사용 금지
 classification_agent = Agent(
     model=_build_model("preprocessor"),
-    result_type=ResponseClassification,
+    output_type=ResponseClassification,
     system_prompt=_SYSTEM_PROMPT,
 )

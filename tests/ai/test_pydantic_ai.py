@@ -10,8 +10,8 @@ async def test_agent_basic_run():
 
     result = await agent.run("안녕!")
 
-    assert result.data is not None
-    print(f"\n[TestModel 응답]: {result.data}")
+    assert result.output is not None
+    print(f"\n[TestModel 응답]: {result.output}")
 
 
 async def test_agent_message_history():
@@ -34,5 +34,5 @@ async def test_agent_with_system_prompt():
 
     result = await agent.run("도쿄 여행 일정 짜줘")
 
-    assert result.data is not None
-    print(f"\n[시스템 프롬프트 적용 응답]: {result.data}")
+    assert result.output is not None
+    print(f"\n[시스템 프롬프트 적용 응답]: {result.output}")

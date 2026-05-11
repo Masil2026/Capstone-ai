@@ -65,7 +65,7 @@ async def _extract_english_city(raw: str) -> str:
         "예) '서울' → Seoul  |  '도쿄' → Tokyo  |  '제주도' → Jeju  |  '방콕' → Bangkok  |  '오사카' → Osaka\n"
         f"입력: {raw}"
     )
-    return result.data.strip()
+    return result.output.strip()
 
 
 # ── Phase 2 플래너 출력 스키마 ───────────────────────────────────────────
@@ -126,7 +126,7 @@ class PlannerDeps:
 planner_agent = Agent(
     model=_build_model("orchestrator"),
     deps_type=PlannerDeps,
-    result_type=PlannerOutput,
+    output_type=PlannerOutput,
     system_prompt="당신은 여행 일정 플래너입니다. 제공된 데이터를 바탕으로 PlannerOutput JSON을 반환하라.",
 )
 
@@ -267,7 +267,7 @@ class SynthesizerDeps:
 synthesizer_agent = Agent(
     model=_build_model("orchestrator"),
     deps_type=SynthesizerDeps,
-    result_type=OrchestratorResult,
+    output_type=OrchestratorResult,
     system_prompt="당신은 여행 일정 완성 전문가입니다. 제공된 데이터를 바탕으로 OrchestratorResult JSON을 반환하라.",
 )
 
@@ -468,7 +468,7 @@ async def _fetch_web_summary(destination: str, preferences: dict | None) -> str:
     result = await preprocessor_agent.run(
         f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.{pref_hint}\n\n{combined}"
     )
-    return result.data
+    return result.output
 
 
 async def _fetch_weather(destination: str, start_date: str, end_date: str, today: str) -> list[dict]:
@@ -663,7 +663,7 @@ async def run_itinerary_pipeline(
         deps=planner_deps,
         message_history=history,
     )
-    planner_output: PlannerOutput = planner_result.data
+    planner_output: PlannerOutput = planner_result.output
 
     # ── Phase 3: 장소 검색 + 동선 병렬 ────────────────────────────────
     place_results = await _fetch_places(planner_output)
@@ -700,4 +700,4 @@ async def run_itinerary_pipeline(
         deps=synth_deps,
         message_history=history,
     )
-    return synth_result.data
+    return synth_result.output
