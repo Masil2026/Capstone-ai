@@ -158,9 +158,14 @@ class FlightAdapter(ApiTools):
 
                 offers = data.get("data", {}).get("offers", [])
                 print(f"[FlightAdapter] search_flights 결과: {len(offers)}개 offers")
-                # Duffel Airways는 테스트용 가상 항공사이므로 제외
+                # Duffel Airways는 테스트용 가상 항공사이므로 제외, 결과 없으면 fallback으로 포함
                 real_offers = [o for o in offers if o.get("owner", {}).get("name") != "Duffel Airways"]
                 print(f"[FlightAdapter] Duffel Airways 제외 후: {len(real_offers)}개 offers")
+                is_duffel_fallback = False
+                if not real_offers and offers:
+                    real_offers = offers
+                    is_duffel_fallback = True
+                    print(f"[FlightAdapter] 실제 항공사 결과 없음 → Duffel Airways fallback 사용 ({len(real_offers)}개)")
                 processed_results = []
                 for offer in real_offers[:10]:
                     segments = offer["slices"][0]["segments"]
@@ -179,10 +184,12 @@ class FlightAdapter(ApiTools):
                         "arriving_at": segments[-1]["arriving_at"],
                         "stops": len(segments) - 1, # 경유 횟수 (0개면 직항, 1개면 1회 경유)
                     })
+                processed_results.sort(key=lambda x: (x["stops"], x["price_krw"]))
 
                 return {
                     "status": "success",
                     "count": len(processed_results),
+                    "is_duffel_fallback": is_duffel_fallback,
                     "data": processed_results
                 }
         
