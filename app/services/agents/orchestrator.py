@@ -62,13 +62,18 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
     예) "1일차는 아사쿠사 → 센소지 → 나카미세 거리 코스로, 저녁에는 원하신 참치회 식당을 배치했습니다. 2일차는 신주쿠 → 하라주쿠 쇼핑 코스로 구성했습니다."
   - **수정**: 반영한 요청과 변경 결과를 구체적으로 설명한다.
     예) "해산물 요청을 반영해 1일차 저녁을 해산물 식당으로 변경했습니다. 3일차에는 시장 방문 코스를 새로 추가했습니다."
+  - **정보 부족**: 누락된 정보를 구체적으로 명시하며 질문한다.
+    예) "여행지가 등록되어 있지 않아요. 어디로 여행을 가실 예정인가요?"
 - `ai_summary`: 번호 목록 형식. 아래 [메모리 업데이트] 참고.
 
 처리:
 1. current_itinerary(여행 기본 정보)가 있으면 반드시 참고한다.
-2. current_itinerary가 없거나 destination·start_date가 비어있으면 일정을 생성하지 말고,
-   사용자에게 여행지·날짜·인원·예산을 먼저 물어봐라. (day_plans는 null로 둔다)
-3. 기본 정보가 모두 있으면 get_weather, search_web, search_place, find_route 도구를 활용해 일정을 구성한다.
+2. **일정 생성 전 필수 정보 검증 — 아래 항목 중 하나라도 없으면 일정을 생성하지 말고 되물어본다. (day_plans = null)**
+   - destinations 배열이 비어있거나 없음 → "여행지를 알려주세요."
+   - start_date 또는 end_date 없음 → "여행 날짜를 알려주세요."
+   - adult_count가 0 또는 없음 → "여행 인원을 알려주세요."
+   - destinations 내 각 도시의 start_date/end_date 누락 → "각 도시의 체류 날짜를 알려주세요."
+3. 필수 정보가 모두 있으면 get_weather, search_web, search_place, find_route 도구를 활용해 일정을 구성한다.
 4. 기존 day_plans가 있으면 사용자 요청에 해당하는 날짜 일정만 새로 작성하여 반환한다.""",
 
     "change": """\
@@ -77,14 +82,24 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 **[응답 형식 — 반드시 준수]**
 반환 JSON의 필드를 아래와 같이 채워야 한다:
 - `change`: 변경된 필드만 포함 (변경하지 않은 필드는 null)
-  가능한 필드: start_date, end_date, budget, adult_count, child_count, child_ages
+  가능한 필드: destinations, start_date, end_date, budget, adult_count, child_count, child_ages
 - `message`: 무엇이 어떻게 변경되었는지 구체적으로 안내한다.
   예) "여행 기간을 5월 3일~7일로 변경하고, 예산을 50만원으로 조정했습니다."
+  정보 부족 시: 누락된 정보를 구체적으로 명시하며 질문한다.
+  예) "추가하시는 아이의 나이를 알려주시겠어요?"
 - `ai_summary`: 번호 목록 형식. 아래 [메모리 업데이트] 참고.
 
 처리:
 1. 외부 API 도구는 호출하지 않는다.
-2. 사용자 메시지에서 변경된 필드만 추출하여 change 필드에 작성한다.""",
+2. 사용자 메시지에서 변경된 필드만 추출하여 change 필드에 작성한다.
+3. **변경 전 정보 부족 검증 — 아래 경우 change = null로 두고 message에서 되물어본다.**
+   - child_count를 늘리는데 추가되는 아이 나이 정보가 없음
+     → "추가하시는 아이의 나이를 알려주시겠어요?"
+   - destinations를 변경하는데 각 도시의 체류 날짜가 명확하지 않음
+     → "각 도시의 체류 날짜를 알려주세요. 예) 파리 3박, 로마 4박"
+   - start_date만 있고 end_date(또는 총 여행 기간)를 알 수 없음
+     → "여행 종료일 또는 총 여행 기간을 알려주세요."
+4. child_ages 배열 길이는 최종 child_count와 반드시 일치해야 한다.""",
 
     "reservation": """\
 ## 이번 요청: 예약 (reservation)
