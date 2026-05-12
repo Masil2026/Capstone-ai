@@ -268,6 +268,8 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 
 **SSE Event:** `done`
 
+**날짜·예산·인원 변경 예시**
+
 ```json
 {
   "type": "change",
@@ -282,28 +284,64 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
   "memory": null,
   "change": {
     "startDate": "2026-05-03",
-    "endDate": "2026-05-07",
-    "budget": 500000.00,
-    "adultCount": 2,
-    "childCount": 1,
-    "childAges": [5]
+    "endDate": "2026-05-07"
+  }
+}
+```
+
+**destinations 변경 예시** (destinations 변경 시 startDate·endDate 항상 함께 포함)
+
+```json
+{
+  "type": "change",
+  "userMessage": {
+    "content": "로마 다음에 바르셀로나 추가해줘",
+    "embedding": [0.0231, -0.1234, ...]
+  },
+  "assistantMessage": {
+    "content": "파리→로마→바르셀로나 순서로 여행지를 업데이트했습니다.",
+    "embedding": [0.0871, 0.0023, ...]
+  },
+  "memory": null,
+  "change": {
+    "destinations": [
+      { "city": "Paris",     "start_date": "2025-06-01", "end_date": "2025-06-04" },
+      { "city": "Rome",      "start_date": "2025-06-04", "end_date": "2025-06-07" },
+      { "city": "Barcelona", "start_date": "2025-06-07", "end_date": "2025-06-10" }
+    ],
+    "startDate": "2025-06-01",
+    "endDate": "2025-06-10"
   }
 }
 ```
 
 ### **change 필드**
 
+**기본 원칙: 변경된 필드만 전송합니다. 변경하지 않은 필드는 payload에 포함하지 않습니다 (`null` 미전송).**
+
 | Field | Required | Type | Description |
 | --- | --- | --- | --- |
-| destinations | N | `Object[]` | 여행지 배열 전체 교체. `[{"city":"Paris","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}, ...]`. 부분 수정 불가 — 항상 전체 배열 전송 |
-| startDate | N | `DATE (YYYY-MM-DD)` | 변경할 여행 시작일. destinations 변경 시 `destinations[0].start_date`와 일치 |
-| endDate | N | `DATE (YYYY-MM-DD)` | 변경할 여행 종료일. destinations 변경 시 `destinations[-1].end_date`와 일치 |
-| budget | N | `Decimal` | 변경할 예산 |
-| adultCount | N | `Int` | 변경할 어른 수 |
-| childCount | N | `Int` | 변경할 아이 수 |
-| childAges | N | `Int[]` | 변경할 아이 나이 배열 |
+| destinations | N | `Object[]` | 여행지 변경 시 포함. 배열 전체를 항상 교체 — 부분 수정 없음. `[{"city":"Paris","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}, ...]` |
+| startDate | N | `DATE (YYYY-MM-DD)` | 여행 시작일 변경 시 포함. destinations 변경 시 `destinations[0].start_date`와 반드시 일치 |
+| endDate | N | `DATE (YYYY-MM-DD)` | 여행 종료일 변경 시 포함. destinations 변경 시 `destinations[-1].end_date`와 반드시 일치 |
+| budget | N | `Decimal` | 예산 변경 시 포함 |
+| adultCount | N | `Int` | 성인 수 변경 시 포함 |
+| childCount | N | `Int` | 아이 수 변경 시 포함 |
+| childAges | N | `Int[]` | 아이 나이 변경 시 포함 |
 
-> 변경하지 않는 필드는 payload에 포함하지 않습니다 (`null` 미전송).
+**필드별 전송 규칙 요약**
+
+| 사용자 요청 | 전송 필드 |
+|------------|----------|
+| "날짜 5월 3일~7일로 바꿔줘" | `startDate`, `endDate` |
+| "예산 100만원으로 늘려줘" | `budget` |
+| "성인 3명으로 변경해줘" | `adultCount` |
+| "아이 추가, 7살" | `childCount`, `childAges` |
+| "파리 대신 암스테르담으로 바꿔줘" | `destinations`(전체 배열), `startDate`, `endDate` |
+| "날짜 바꾸고 예산도 늘려줘" | `startDate`, `endDate`, `budget` |
+
+> Spring Boot는 수신한 필드만 `itineraries` 테이블에 업데이트합니다. 누락된 필드는 기존 DB 값을 유지합니다.
+> `total_days`는 payload에 없으며, Spring Boot가 `(endDate - startDate + 1)`로 자동 재계산합니다.
 > 
 
 ---

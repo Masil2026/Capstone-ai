@@ -181,7 +181,7 @@ orchestrator는 이를 참고해 적절한 도구를 선택합니다.
 #### change 타입 — destinations 전체 교체
 
 destinations 변경(여행지 추가·제거·순서 변경 포함)은 `change` 타입으로 처리합니다.
-destinations가 바뀌면 `start_date`, `end_date`, `total_days`도 함께 반환합니다.
+destinations가 바뀌면 `start_date`, `end_date`도 함께 반환합니다. `total_days`는 payload에 포함하지 않으며 Spring Boot가 `(end_date - start_date + 1)`로 재계산합니다.
 
 ```python
 class ChangeFields(BaseModel):
