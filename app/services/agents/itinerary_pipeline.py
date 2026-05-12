@@ -513,10 +513,11 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
 
     lines += ["", "## 선택된 항공편"]
     for fl in po.selected_flights:
+        stops_str = "직항" if fl.stops == 0 else f"{fl.stops}회 경유"
         lines.append(
             f"- [leg_index={fl.leg_index}, {fl.direction}] {fl.airline} | "
             f"{fl.origin}→{fl.destination} | "
-            f"{fl.departing_at} ~ {fl.arriving_at} | {fl.price_krw:,}원 ({fl.currency} {fl.price_original})"
+            f"{fl.departing_at} ~ {fl.arriving_at} | {fl.price_krw:,}원 ({fl.currency} {fl.price_original}) | {stops_str}"
         )
 
     lines += ["", "## 선택된 숙소"]
