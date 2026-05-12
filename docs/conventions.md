@@ -177,7 +177,9 @@ agent = Agent(
 def build_context_prompt(deps: MyDeps) -> str:
     sections = []
     if deps.current_itinerary:
-        sections.append(f"## 현재 여행 정보\n- 여행지: {deps.current_itinerary['destination']}")
+        dests = deps.current_itinerary.get('destinations', [])
+        dest_str = " → ".join(d['city'] for d in dests) if dests else "미설정"
+        sections.append(f"## 현재 여행 정보\n- 여행지: {dest_str}")
     if deps.ai_summary:
         sections.append(f"## 이전 대화 요약\n{deps.ai_summary}")
     return "\n\n".join(sections)

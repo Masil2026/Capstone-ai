@@ -80,10 +80,22 @@ pgvector 코사인 유사도 검색 (read-only)
 roomId
   ↓
 PostgreSQL read-only 조회
-  SELECT day_plans FROM itineraries WHERE room_id = :room_id
+  SELECT destinations, start_date, end_date, total_days,
+         budget, adult_count, child_count, child_ages, day_plans
+  FROM itineraries WHERE room_id = :room_id
   ↓
 current_itinerary → orchestrator 시스템 프롬프트에 주입
   없으면 None (신규 일정 생성으로 처리)
+```
+
+`destinations`는 도시별 날짜 배열입니다. 단일 목적지도 길이 1 배열로 저장됩니다.
+
+```json
+[
+  { "city": "Paris",     "start_date": "2025-06-01", "end_date": "2025-06-04" },
+  { "city": "Rome",      "start_date": "2025-06-04", "end_date": "2025-06-07" },
+  { "city": "Barcelona", "start_date": "2025-06-07", "end_date": "2025-06-10" }
+]
 ```
 
 > 일정이 없는 경우(첫 일정 생성)는 `current_itinerary = None`으로 처리하며, orchestrator가 전체 일정을 새로 생성합니다.
@@ -98,7 +110,7 @@ orchestrator가 응답 생성 시 활용하는 컨텍스트:
 | preferences | 사용자 취향 JSON (전체 누적) | DB chat_rooms (매 요청 직접 조회) |
 | chat_history | 최근 20개 메시지 | DB chat_messages (매 요청 직접 조회) |
 | 유사 과거 메시지 | 의미적으로 유사한 과거 대화 최대 5개 | pgvector (read-only) |
-| current_itinerary | 현재 여행 일정 전체 (destination·dates·budget·adults 포함) | DB itineraries (read-only) |
+| current_itinerary | 현재 여행 일정 전체 (destinations 배열·dates·budget·adults 포함) | DB itineraries (read-only) |
 
 > FastAPI의 DB 접근은 **read-only**에 한합니다. 모든 DB 쓰기는 Java(Spring Boot)가 `done` 이벤트 수신 후 처리합니다.
 
@@ -119,8 +131,9 @@ class OrchestratorDeps:
     similar_messages: list[dict]                # pgvector 유사 과거 메시지 (최대 5개)
                                                 # [{"role": "user"|"assistant", "content": "..."}]
     current_itinerary: dict | None              # 현재 여행 일정 전체 (DB itineraries, read-only)
-                                                # {"destination", "start_date", "end_date", "budget", ...}
-                                                # 일정 없으면 None
+                                                # {"destinations": [...], "start_date", "end_date", "budget", ...}
+                                                # destinations: [{"city", "start_date", "end_date"}, ...]
+                                                # 단일 목적지도 길이 1 배열. 일정 없으면 None
     request_type: str                           # classification_agent 판별 결과
 ```
 
@@ -164,6 +177,30 @@ orchestrator는 이를 참고해 적절한 도구를 선택합니다.
 | `reservation` | search_flights / search_hotels + 예약 API | `reservation` | reservations 테이블 저장 |
 | `cancel` | 취소 API | `cancel` | reservations.status = "cancelled" |
 | `chat` | search_web, get_weather 등 (필요 시) | — | 추가 처리 없음 |
+
+#### change 타입 — destinations 전체 교체
+
+destinations 변경(여행지 추가·제거·순서 변경 포함)은 `change` 타입으로 처리합니다.
+destinations가 바뀌면 `start_date`, `end_date`, `total_days`도 함께 반환합니다.
+
+```python
+class ChangeFields(BaseModel):
+    destinations: list[DestinationItem] | None = None  # 전체 배열 교체. 변경 없으면 None
+    start_date: str | None = None   # destinations 변경 시 destinations[0].start_date와 일치
+    end_date: str | None = None     # destinations 변경 시 destinations[-1].end_date와 일치
+    # total_days는 payload에 포함하지 않음 — Spring Boot가 (end_date - start_date + 1)로 재계산
+    budget: float | None = None
+    adult_count: int | None = None
+    child_count: int | None = None
+    child_ages: list[int] | None = None
+
+class DestinationItem(BaseModel):
+    city: str
+    start_date: str   # YYYY-MM-DD
+    end_date: str     # YYYY-MM-DD
+```
+
+> destinations를 부분 수정하는 API는 없습니다. 항상 배열 전체를 교체합니다.
 
 모든 type에서 사용자 취향·요약 정보가 감지되면 OrchestratorResult의 `ai_summary`, `preferences` 필드에 값을 채워 반환합니다 (별도 도구 호출 없음).
 
@@ -232,15 +269,15 @@ type 반환 ("chat" | "itinerary" | "change" | "reservation" | "cancel")
 | type | 사용자 메시지 기준 |
 |------|-----------------|
 | `itinerary` | 일정 신규 생성 또는 장소·순서·시간 수정 요청 |
-| `change` | 여행 날짜·예산·인원(성인/아이 수·나이) 변경 요청 (목적지 변경 없음) |
+| `change` | 여행 날짜·예산·인원(성인/아이 수·나이)·**여행지(destinations 전체 교체)** 변경 요청 |
 | `reservation` | 항공권 또는 숙소 예약 요청 |
 | `cancel` | 예약 취소 요청 |
 | `chat` | 위 4가지에 해당하지 않는 일반 대화·질문·정보 요청 |
 
 ### itinerary vs change 구분
 
-- **itinerary**: "경복궁 대신 창덕궁으로 바꿔줘", "3일차 일정 추가해줘" → 일정 내용 변경
-- **change**: "여행 날짜 5월 3일부터 7일로 바꿔줘", "예산 100만원으로 늘려줘" → 여행 기본 정보 변경
+- **itinerary**: "경복궁 대신 창덕궁으로 바꿔줘", "3일차 일정 추가해줘" → 일정 내용(day_plans) 변경
+- **change**: "여행 날짜 5월 3일부터 7일로 바꿔줘", "예산 100만원으로 늘려줘", "파리 대신 암스테르담으로 바꿔줘", "로마 다음에 바르셀로나 추가해줘" → 여행 기본 정보(destinations·날짜·예산·인원) 변경
 
 ### ResponseClassification 구조
 
@@ -258,6 +295,7 @@ class ResponseClassification(BaseModel):
 | `type` | classification_agent |
 | `itinerary.dayPlans` | OrchestratorResult.day_plans |
 | `change.*` | OrchestratorResult.change |
+| `change.destinations` | destinations 전체 배열 교체 시 포함. `start_date`/`end_date`/`total_days`도 함께 포함 |
 | `reservation` | OrchestratorResult.reservation |
 | `cancel.*` | OrchestratorResult.cancel |
 | `memory.aiSummary` | OrchestratorResult.ai_summary (이전 ai_summary + 현재 대화 합산 전체 재요약). `None`이면 `done.memory = null` |
@@ -299,13 +337,16 @@ POST /api/v1/ai-messages (Spring Boot 요청)
 [4] classification_agent.run(user_message) → type 판별
     (빠름. orchestrator 전에 완료하여 request_type으로 전달)
   ↓
-[5] type == "itinerary" → run_itinerary_pipeline (4단계 파이프라인)
+[5] type == "itinerary" → run_itinerary_pipeline (4단계 파이프라인, 다구간 지원)
     type 그 외 → orchestrator_agent.run(user_message, deps, history)
     ├─ type에 맞는 외부 API 도구 호출
     └─ OrchestratorResult 구조화 출력 반환
     ※ day_plans 반환 정책:
        - 신규 생성: 전체 날짜 포함
        - 수정:     사용자가 요청한 날짜만 반환 (변경 없는 날짜는 포함하지 않음)
+    ※ change.destinations 반환 정책:
+       - destinations 변경 시 배열 전체 교체 (부분 수정 없음)
+       - start_date / end_date / total_days 항상 함께 반환
   ↓
 [6] chunk 이벤트 전송 (full_response 한 번에)
   ↓
@@ -373,9 +414,83 @@ AI 에이전트는 **DB(PostgreSQL)를 진실의 원천(source of truth)**으로
 
 ---
 
-## 9. 구현 설계 결정 사항
+## 9. itinerary 파이프라인 — 다구간 상세
 
-### 9-1. pgvector 비동기 접근
+`run_itinerary_pipeline`은 `destinations` 배열을 기준으로 동작합니다. 단일 목적지(배열 길이 1)와 다구간(길이 N) 모두 동일한 코드로 처리합니다.
+
+### LLM 호출 횟수 — 목적지 수와 무관하게 고정
+
+| 단계 | 모델 | 호출 수 |
+|------|------|---------|
+| classification_agent | GPT-4o-mini | 1 |
+| _extract_english_cities (배치) | GPT-4o-mini | 1 (N개 도시 한 번에) |
+| _fetch_web_summaries (도시별 병렬 후 배치 요약) | GPT-4o-mini | 1 |
+| planner_agent | GPT-4.1 | 1 |
+| synthesizer_agent | GPT-4.1 | 1 |
+| **합계** | | **GPT-4.1 ×2 + GPT-4o-mini ×3** |
+
+### Phase 1 — 병렬 데이터 수집 (LLM 0회)
+
+N개 목적지의 모든 데이터를 `asyncio.gather`로 한꺼번에 수집합니다.
+
+```
+destinations = [Paris(06-01~04), Rome(06-04~07), Barcelona(06-07~10)]
+
+병렬 실행:
+  웹 검색   × 3 도시 (Tavily, 도시당 2쿼리)
+  날씨      × 3 도시 (Open-Meteo)
+  항공      × 4 구간 (Seoul→Paris, Paris→Rome, Rome→Barcelona, Barcelona→Seoul)
+  숙소      × 3 도시 (Duffel, 각자 check_in/check_out 다름)
+  도시명 영문 변환 (배치 1회 — GPT-4o-mini)
+
+웹검색 결과 요약 (배치 1회 — GPT-4o-mini): 전 도시 결과 → 도시별 요약 dict
+```
+
+### Phase 2 — 플래너 (GPT-4.1 ×1)
+
+모든 목적지 데이터를 단일 프롬프트에 담아 한 번에 처리합니다.
+
+```python
+class SelectedFlight(BaseModel):
+    direction: str    # "depart" | "connect" | "return"
+    leg_index: int    # 0=Seoul→D1, 1=D1→D2, 2=D2→D3, ...
+    origin: str
+    destination: str
+    ...
+
+class DaySchedule(BaseModel):
+    date: str         # YYYY-MM-DD
+    city: str         # 어느 도시의 일정인지 — 합성기가 도시 전환일 처리에 사용
+    ordered_queries: list[str]
+
+class PlannerOutput(BaseModel):
+    days: list[DaySchedule]
+    selected_flights: list[SelectedFlight]  # depart 1 + connect N-1 + return 1
+    selected_hotels: list[SelectedHotel]    # 도시당 1개
+```
+
+플래너 프롬프트 추가 규칙:
+- 도시 이동일: 오전 관광 → 공항/역 이동 → 연결편 → 다음 도시 도착 후 일정
+- 연결 항공이 없는 도시 간 이동은 기차/버스 옵션 포함 (Tavily 검색 결과 활용)
+
+### Phase 3 — 장소 검색 + 동선 병렬 (LLM 0회)
+
+`DaySchedule.ordered_queries` 전체를 Google Maps에 병렬 호출합니다. 도시가 여러 개여도 쿼리에 도시명이 포함되어 있어 추가 처리 불필요합니다.
+
+### Phase 4 — 합성기 (GPT-4.1 ×1)
+
+전체 일정을 단일 호출로 작성합니다.
+
+합성기 프롬프트 추가 규칙:
+- 도시 전환일 항목: `이전 도시 체크아웃 → 공항/역 이동 → 연결편 → 다음 도시 이동`
+- 연결편 cost: `SelectedFlight[direction="connect"]`의 price_original·currency·price_krw 사용
+- 숙소 체크인 항목: 해당 도시 `SelectedHotel.check_in` 날짜에 삽입
+
+---
+
+## 10. 구현 설계 결정 사항
+
+### 10-1. pgvector 비동기 접근
 
 `database.py`는 동기 SQLAlchemy 세션을 사용합니다. FastAPI async 환경에서 pgvector 쿼리 시 블로킹을 방지하기 위해 `asyncio.get_event_loop().run_in_executor(None, sync_query_fn)`으로 스레드풀에서 실행합니다.
 
@@ -397,7 +512,7 @@ loop = asyncio.get_event_loop()
 similar = await loop.run_in_executor(None, _query_similar_messages, room_id, embedding)
 ```
 
-### 9-2. 단계별 에러 처리 정책
+### 10-2. 단계별 에러 처리 정책
 
 각 단계 실패 시 전체 요청을 중단하지 않고 폴백합니다.
 
@@ -408,7 +523,7 @@ similar = await loop.run_in_executor(None, _query_similar_messages, room_id, emb
 | AI 응답 임베딩 생성 | `embedding = null`로 done 이벤트 전송. Spring Boot는 null embedding은 저장하지 않음 |
 | orchestrator 스트리밍 중 실패 | SSE 연결 종료. Spring Boot가 `504 Gateway Timeout` 또는 `503` 반환 |
 
-### 9-3. LLM 모델 기본값
+### 10-3. LLM 모델 기본값
 
 `ORCHESTRATOR_MODEL`, `PREPROCESSOR_MODEL` 환경변수가 없으면 아래 기본값을 사용합니다.
 

@@ -295,15 +295,13 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 
 | Field | Required | Type | Description |
 | --- | --- | --- | --- |
-| startDate | N | `DATE (YYYY-MM-DD)` | 변경할 여행 시작일 |
-| endDate | N | `DATE (YYYY-MM-DD)` | 변경할 여행 종료일 |
+| destinations | N | `Object[]` | 여행지 배열 전체 교체. `[{"city":"Paris","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}, ...]`. 부분 수정 불가 — 항상 전체 배열 전송 |
+| startDate | N | `DATE (YYYY-MM-DD)` | 변경할 여행 시작일. destinations 변경 시 `destinations[0].start_date`와 일치 |
+| endDate | N | `DATE (YYYY-MM-DD)` | 변경할 여행 종료일. destinations 변경 시 `destinations[-1].end_date`와 일치 |
 | budget | N | `Decimal` | 변경할 예산 |
 | adultCount | N | `Int` | 변경할 어른 수 |
 | childCount | N | `Int` | 변경할 아이 수 |
 | childAges | N | `Int[]` | 변경할 아이 나이 배열 |
-
-> `destination`은 payload에 포함하지 않습니다. 목적지는 수정 불가입니다.
-> 
 
 > 변경하지 않는 필드는 payload에 포함하지 않습니다 (`null` 미전송).
 > 
@@ -417,7 +415,7 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
     - DB `chat_rooms`: `ai_summary`, `preferences` 직접 조회 → 조회 후 Redis `memory:{roomId}` 동기화 (fire-and-forget)
     - DB `chat_messages`: 최근 20개 대화 이력 (시간 역순 조회 후 pydantic-ai ModelMessage 변환)
     - DB `chat_messages` (pgvector): 유사 과거 메시지 최대 5개 (코사인 유사도 기준)
-    - DB `itineraries`: 현재 여행 일정 전체 (destination·start_date·end_date·budget·adult_count·child_count·child_ages·day_plans 포함)
+    - DB `itineraries`: 현재 여행 일정 전체 (destinations·start_date·end_date·budget·adult_count·child_count·child_ages·day_plans 포함)
 3. **Agent 처리 및 type 판별**: 대화 이력, memory, 사용자 메시지를 기반으로 Agent가 요청 의도를 분석하고 `type`을 판별합니다.
     - `"chat"`
     - `"itinerary"`
@@ -478,8 +476,8 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
         - 신규 일정이면 `status = "todo"`
         - `time` 기준 오름차순 정렬
     - `"change"` → `itinerary_logs` 스냅샷 저장 → `itineraries` 기본 정보 갱신
+        - `destinations` 포함 시 배열 전체 교체, `start_date`/`end_date` 함께 갱신, `total_days`는 Spring Boot에서 `(end_date - start_date + 1)`로 재계산
         - 날짜 범위 변경 시 `day_plans` 키 조정
-        - `destination`은 수정하지 않음
     - `"reservation"` → `itineraryRepository.findByRoomId(roomId)`로 `itineraryId` 조회 → `reservations` 저장
         - `bookedBy = "ai"`
         - `status = "confirmed"`
@@ -537,7 +535,7 @@ Spring Boot가 done.memory를 받아 DB chat_rooms 저장
 
 | 상황 | Spring Boot 응답 | 원인 |
 | --- | --- | --- |
-| 60초 내 스트림 미완료 | `504 Gateway Timeout` | `TimeoutException` |
+| 180초 내 스트림 미완료 | `504 Gateway Timeout` | `TimeoutException` |
 | FastAPI 서버 연결 불가 | `503 Service Unavailable` | `WebClientRequestException` |
 | FastAPI 4xx / 5xx 응답 | `502 Bad Gateway` | `WebClientResponseException` |
 | 알 수 없는 SSE event type | 해당 이벤트 무시 (`log.warn`) | - |
