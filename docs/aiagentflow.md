@@ -172,11 +172,35 @@ orchestrator는 이를 참고해 적절한 도구를 선택합니다.
 
 | type | 외부 API 도구 | 구조화 출력 필드 | Spring Boot 후처리 |
 |------|-------------|----------------|------------------|
-| `itinerary` | search_place, search_web, get_weather, find_route 등 | `day_plans` | dayPlans로 DB 일정 교체 |
-| `change` | **없음** | `change` | change 값으로 DB 직접 업데이트 |
+| `itinerary` | search_place, search_web, get_weather, find_route 등 | `day_plans` | dayPlans로 DB 일정 교체. `day_plans=null`이면 되묻기로 처리하여 DB 업데이트 없음 |
+| `change` | **없음** | `change` | change 값으로 DB 직접 업데이트. `change=null`이면 되묻기로 처리하여 DB 업데이트 없음 |
 | `reservation` | search_flights / search_hotels + 예약 API | `reservation` | reservations 테이블 저장 |
 | `cancel` | 취소 API | `cancel` | reservations.status = "cancelled" |
 | `chat` | search_web, get_weather 등 (필요 시) | — | 추가 처리 없음 |
+
+#### itinerary 타입 — 필수 정보 검증 (2중 검증)
+
+프론트엔드에서 기본 여행 정보를 입력받더라도, 오케스트레이터가 일정 생성 전에 한 번 더 검증합니다.
+아래 항목 중 하나라도 누락이면 `day_plans = null`로 두고 `message`에서 되물어봅니다.
+
+| 검증 항목 | 되묻기 예시 |
+|----------|-----------|
+| `destinations` 배열이 비거나 없음 | "여행지를 알려주세요." |
+| `start_date` 또는 `end_date` 없음 | "여행 날짜를 알려주세요." |
+| `adult_count`가 0 또는 없음 | "여행 인원을 알려주세요." |
+| destinations 내 도시의 날짜 누락 | "각 도시의 체류 날짜를 알려주세요." |
+
+#### change 타입 — 정보 부족 시 되묻기
+
+변경에 필요한 정보가 부족하면 `change = null`로 두고 `message`에서 사용자에게 되물어봅니다. DB 업데이트는 발생하지 않습니다.
+
+| 상황 | 되묻기 예시 |
+|------|-----------|
+| 아이 수를 늘리는데 나이 정보 없음 | "추가하시는 아이의 나이를 알려주시겠어요?" |
+| destinations 변경인데 도시별 날짜 불명확 | "각 도시의 체류 날짜를 알려주세요. 예) 파리 3박, 로마 4박" |
+| start_date만 있고 end_date 또는 기간 불명 | "여행 종료일 또는 총 여행 기간을 알려주세요." |
+
+`child_ages` 배열 길이는 최종 `child_count`와 반드시 일치해야 합니다.
 
 #### change 타입 — destinations 전체 교체
 
