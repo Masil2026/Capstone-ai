@@ -222,6 +222,7 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "- 출발 시간 제한 없음. 새벽(00:00~06:00) / 야간(21:00~23:59) 출발도 정상 선택 가능.",
         "- 장거리 국제선(유럽·미주·오세아니아)은 새벽·야간 출발이 일반적이므로 시간대 무관하게 최적 편 선택.",
         "- 가격·경유 횟수·도착 시간을 종합해 최선의 편 선택. 비용이 낮고 경유 적은 편 우선.",
+        "- ⚠️ '실시간 항공편 없음' 표시된 구간은 selected_flights에 절대 포함하지 말 것. 항공편을 임의로 만들거나 추측하지 말 것.",
         "",
         "## ordered_queries 작성 규칙",
         "- 방문 순서 그대로: 아침식사 → 관광지 → 이동 → 점심 → 관광지 → 저녁 순",
@@ -252,14 +253,21 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         )
         data = leg["data"]
         if data.get("status") == "success":
-            for f in data.get("data", [])[:6]:
-                lines.append(
-                    f"  - {f.get('airline')} | {f.get('origin')}→{f.get('destination')} | "
-                    f"{f.get('departing_at','')} ~ {f.get('arriving_at','')} | "
-                    f"{f.get('price_krw',0):,}원 | {f.get('stops',0)}회 경유"
-                )
+            offers = data.get("data", [])
+            is_fallback = data.get("is_duffel_fallback", False)
+            if offers:
+                if is_fallback:
+                    lines.append("  ⚠️ [DUFFEL FALLBACK] 실제 항공사 결과 없음 — Duffel Airways(테스트용 가상 항공사) 결과를 대신 사용. 이 구간은 반드시 selected_flights에 포함할 것. 임의로 다른 항공사를 만들어 넣지 말 것.")
+                for f in offers[:6]:
+                    lines.append(
+                        f"  - {f.get('airline')} | {f.get('origin')}→{f.get('destination')} | "
+                        f"{f.get('departing_at','')} ~ {f.get('arriving_at','')} | "
+                        f"{f.get('price_original','?')} {f.get('currency','?')} ({f.get('price_krw',0):,}원) | {f.get('stops',0)}회 경유"
+                    )
+            else:
+                lines.append("  - ⚠️ 실시간 항공편 없음 — 이 구간은 selected_flights에 절대 포함하지 말 것. 임의로 항공편을 만들어 넣지 말 것.")
         else:
-            lines.append("  - 검색 실패")
+            lines.append("  - 검색 실패 — 이 구간은 selected_flights에 절대 포함하지 말 것.")
 
     lines += ["", "## 숙소 데이터 (도시별)"]
     for dest in destinations:
