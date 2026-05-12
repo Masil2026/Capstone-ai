@@ -2,10 +2,13 @@
 """
 일정 생성 4단계 파이프라인 — LLM 호출 최소화.
 
-Phase 1 (LLM 0회): 웹 검색·날씨·항공(출발+귀국)·숙소 병렬 호출
+Phase 1 (LLM 0회): 웹 검색·날씨·항공(전체 구간)·숙소 병렬 호출
 Phase 2 (LLM 1회): 플래너 — 항공/숙소 선택 + 날짜별 방문 순서 확정 (ordered_queries)
 Phase 3 (LLM 0회): 장소 검색 + 동선 계산 병렬 호출
 Phase 4 (LLM 1회): 합성기 — 최종 OrchestratorResult 작성
+
+단일 목적지: destinations = [{"city": "Tokyo", ...}]  → 기존과 동일한 경로
+다중 목적지: destinations = [{"city": "Paris", ...}, {"city": "Rome", ...}]  → 구간별 처리
 """
 from __future__ import annotations
 
@@ -42,41 +45,68 @@ _service = TravelAgentService({
 _DEFAULT_ORIGIN = "Seoul"
 
 
-async def _extract_english_city(raw: str) -> str:
+async def _extract_english_cities(cities: list[str]) -> list[str]:
     """
-    DB에 저장된 도시명에서 영문명을 추출한다.
+    도시명 목록에서 영문명을 일괄 추출한다. 순수 한국어 도시는 단일 LLM 호출로 처리.
 
     처리 순서:
-    1. 괄호 제거 후 쉼표·슬래시로 분리 → 영문 토큰이 있으면 바로 반환
-       예) "인천, incheon"  → "incheon"
-           "(서울, Seoul)"  → "Seoul"
-           "Tokyo"          → "Tokyo"
-    2. 영문 토큰이 없으면(순수 한국어) preprocessor_agent로 번역
-       예) "도쿄" → "Tokyo", "오사카" → "Osaka"
+    1. 괄호 제거 후 쉼표·슬래시로 분리 → 영문 토큰이 있으면 바로 사용
+       예) "인천, incheon" → "Incheon" | "(서울, Seoul)" → "Seoul" | "Tokyo" → "Tokyo"
+    2. 영문 토큰이 없는 도시들은 모아서 preprocessor_agent에 단일 호출
+       예) ["도쿄", "오사카"] → 1회 LLM 호출 → ["Tokyo", "Osaka"]
     """
-    clean = re.sub(r"[()（）]", " ", raw).strip()
-    for part in re.split(r"[,、/\\]", clean):
-        part = part.strip()
-        if part and re.match(r"^[A-Za-z][A-Za-z\s\-]*$", part):
-            return part
-    # 순수 한국어 → LLM 번역
-    result = await preprocessor_agent.run(
-        "도시명을 영문으로만 답해줘. 영문 도시명 외 다른 텍스트는 출력하지 마.\n"
-        "Island, City, Province 같은 지역 접미사는 붙이지 말고 도시명만 짧게 반환.\n"
-        "예) '서울' → Seoul  |  '도쿄' → Tokyo  |  '제주도' → Jeju  |  '방콕' → Bangkok  |  '오사카' → Osaka\n"
-        f"입력: {raw}"
-    )
-    return result.output.strip()
+    results: list[str | None] = []
+    korean_indices: list[int] = []
+    korean_cities: list[str] = []
+
+    for city in cities:
+        clean = re.sub(r"[()（）]", " ", city).strip()
+        found = None
+        for part in re.split(r"[,、/\\]", clean):
+            part = part.strip()
+            if part and re.match(r"^[A-Za-z][A-Za-z\s\-]*$", part):
+                found = part
+                break
+        results.append(found)
+        if found is None:
+            korean_indices.append(len(results) - 1)
+            korean_cities.append(city)
+
+    if korean_cities:
+        city_list = "\n".join(f"{i+1}. {c}" for i, c in enumerate(korean_cities))
+        result = await preprocessor_agent.run(
+            "아래 도시명들을 영문으로만 답해줘. 번호 그대로 줄바꿈으로 구분하여 반환.\n"
+            "영문 도시명 외 다른 텍스트는 출력하지 마.\n"
+            "Island, City, Province 같은 지역 접미사 없이 도시명만 짧게 반환.\n"
+            "예) '서울' → Seoul | '도쿄' → Tokyo | '제주도' → Jeju | '방콕' → Bangkok\n\n"
+            f"{city_list}"
+        )
+        translated = [
+            line.strip().lstrip("0123456789. ")
+            for line in result.output.strip().split("\n")
+            if line.strip()
+        ]
+        for idx, eng in zip(korean_indices, translated):
+            results[idx] = eng
+
+    return [r or city for r, city in zip(results, cities)]
+
+
+async def _extract_english_city(raw: str) -> str:
+    """단일 도시명 영문 추출 (하위 호환용)."""
+    result = await _extract_english_cities([raw])
+    return result[0]
 
 
 # ── Phase 2 플래너 출력 스키마 ───────────────────────────────────────────
 
 class SelectedFlight(BaseModel):
-    direction: str          # "depart" | "return"
+    direction: str      # "depart" | "connect" | "return"
+    leg_index: int      # 0=depart, 1..N-1=connect, N=return
     airline: str
     origin: str
     destination: str
-    departing_at: str       # ISO 8601
+    departing_at: str   # ISO 8601
     arriving_at: str
     price_original: float
     currency: str
@@ -87,7 +117,7 @@ class SelectedHotel(BaseModel):
     city: str
     name: str
     address: str
-    check_in: str           # YYYY-MM-DD
+    check_in: str       # YYYY-MM-DD
     check_out: str
     price_original: float | None = None
     currency: str
@@ -96,11 +126,9 @@ class SelectedHotel(BaseModel):
 
 class DaySchedule(BaseModel):
     date: str               # YYYY-MM-DD
+    city: str               # 해당 날짜의 여행 도시 (한국어 원본)
     ordered_queries: list[str]
     # 방문 순서대로 관광지 + 식사 장소 검색어 (Google Maps search_place에 사용)
-    # 예) ["breakfast cafe Asakusa Tokyo", "Senso-ji Temple Tokyo",
-    #       "Nakamise Street Asakusa Tokyo", "ramen Asakusa Tokyo",
-    #       "Ueno Park Tokyo", "conveyor belt sushi Ueno Tokyo"]
 
 class PlannerOutput(BaseModel):
     days: list[DaySchedule]
@@ -112,12 +140,12 @@ class PlannerOutput(BaseModel):
 
 @dataclass
 class PlannerDeps:
-    itinerary_info: dict        # destination, start_date, end_date, budget, adults…
-    web_summary: str
-    weather: list[dict]
-    flights_depart: dict
-    flights_return: dict
-    hotels: dict
+    itinerary_info: dict
+    web_summaries: dict          # city → 요약 텍스트
+    weather_by_city: dict        # city → list[dict]
+    flight_legs: list[dict]      # [{leg_index, direction, from, to, data}, ...]
+    hotels_by_city: dict         # city → 숙소 검색 결과
+    cities_en: list[str]         # 영문 도시명 (destinations 순서와 일치)
     preferences: dict | None
     ai_summary: str | None
     today: str
@@ -134,22 +162,10 @@ planner_agent = Agent(
 
 def _build_planner_prompt(d: PlannerDeps) -> str:
     info = d.itinerary_info
-    print(
-        f"\n[planner_agent] _build_planner_prompt 호출\n"
-        f"  destination={info.get('destination')}, start={info.get('start_date')}, end={info.get('end_date')}\n"
-        f"  budget={info.get('budget')}, adults={info.get('adult_count')}, children={info.get('child_count')}\n"
-        f"  ai_summary       : {d.ai_summary}\n"
-        f"  preferences      : {d.preferences}\n"
-        f"  similar_messages : {len(d.similar_messages)}건\n"
-        f"  weather          : {len(d.weather)}건\n"
-        f"  flights_depart   : status={d.flights_depart.get('status')}\n"
-        f"  flights_return   : status={d.flights_return.get('status')}\n"
-        f"  hotels           : status={d.hotels.get('status')}",
-        flush=True,
-    )
-    dest = info.get("destination", "여행지")
-    start = info.get("start_date", "")
-    end = info.get("end_date", "")
+    destinations = info.get("destinations") or []
+    dest_str = " → ".join(dest["city"] for dest in destinations) if destinations else "여행지"
+    start = destinations[0]["start_date"] if destinations else info.get("start_date", "")
+    end = destinations[-1]["end_date"] if destinations else info.get("end_date", "")
     total_days = info.get("total_days", 1)
     budget = info.get("budget")
     adults = info.get("adult_count", 1)
@@ -159,42 +175,124 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
     budget_str = f"{budget:,.0f}원" if budget else "제한 없음"
     child_str = f"어린이 {children}명 (나이: {child_ages})" if children else "없음"
 
-    existing_plans = info.get("day_plans")
+    print(
+        f"\n[planner_agent] _build_planner_prompt 호출\n"
+        f"  destinations={dest_str}, start={start}, end={end}\n"
+        f"  budget={budget}, adults={adults}, children={children}\n"
+        f"  ai_summary       : {d.ai_summary}\n"
+        f"  preferences      : {d.preferences}\n"
+        f"  similar_messages : {len(d.similar_messages)}건\n"
+        f"  flight_legs      : {len(d.flight_legs)}개 구간\n"
+        f"  hotels_by_city   : {list(d.hotels_by_city.keys())}",
+        flush=True,
+    )
 
     lines = [
         "당신은 여행 일정 플래너입니다.",
-        f"여행지: {dest} | 기간: {start} ~ {end} ({total_days}일) | 오늘: {d.today}",
+        f"여행 경로: 한국 → {dest_str} → 한국 | 기간: {start} ~ {end} ({total_days}일) | 오늘: {d.today}",
         f"인원: 성인 {adults}명, 어린이 {child_str} | 총 예산: {budget_str}",
         "출발지: 대한민국 — 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다.",
         "",
         "## 역할",
         "아래 데이터를 바탕으로 3가지를 결정하고 PlannerOutput을 반환하라:",
-        "1. selected_flights: 출발편·귀국편 각 1개 선택 (direction='depart'/'return')",
-        "   - 출발편(depart): 한국(ICN/GMP) → 여행지 방향 항공편",
-        "   - 귀국편(return): 여행지 → 한국(ICN/GMP) 방향 항공편",
-        "   - ## 항공편 데이터의 origin·destination 값으로 방향을 확인할 것",
-        "2. selected_hotels: 예산에 맞는 숙소 1개 선택",
-        "3. days: ordered_queries (방문 순서대로 장소 검색어 목록)",
-        "   - 기존 일정이 없으면: 전체 날짜에 대해 작성",
-        "   - 기존 일정이 있으면: **사용자가 수정 요청한 날짜만** 작성 (나머지 날짜는 days에 포함하지 않는다)",
+        "1. selected_flights: 모든 항공 구간 선택 (leg_index별 1개씩)",
+    ]
+
+    for leg in d.flight_legs:
+        lines.append(
+            f"   - leg_index={leg['leg_index']} ({leg['direction']}): "
+            f"{leg['from']} → {leg['to']}"
+        )
+
+    lines += [
+        "2. selected_hotels: 각 도시별 숙소 1개씩 선택",
+        "3. days: 날짜별 city 필드와 ordered_queries 목록",
+        "   - city: 해당 날짜의 여행 도시명 (destinations 배열 기준으로 배정, 한국어 원본)",
+        "   - ordered_queries: 방문 순서대로 관광지 + 식사 장소 검색어",
+        "   - 기존 일정이 없으면: 전체 날짜에 대해 작성 (start_date ~ end_date 모든 날짜 포함, 하루도 빠짐없이)",
+        "   ⚠️ 이동일·경유일·항공 탑승일도 포함하되 ordered_queries=[]로 설정. 날짜 누락 절대 금지.",
+        "   - 기존 일정이 있으면: **사용자가 수정 요청한 날짜만** 작성 (나머지 날짜는 포함하지 않는다)",
+        "",
+        "## 여행 일정 개요 (도시별 체류 기간)",
+    ]
+    for dest in destinations:
+        lines.append(f"- {dest['city']}: {dest['start_date']} ~ {dest['end_date']}")
+
+    lines += ["", "## 항공편 선택 규칙",
+        "- 출발 시간 제한 없음. 새벽(00:00~06:00) / 야간(21:00~23:59) 출발도 정상 선택 가능.",
+        "- 장거리 국제선(유럽·미주·오세아니아)은 새벽·야간 출발이 일반적이므로 시간대 무관하게 최적 편 선택.",
+        "- 가격·경유 횟수·도착 시간을 종합해 최선의 편 선택. 비용이 낮고 경유 적은 편 우선.",
         "",
         "## ordered_queries 작성 규칙",
         "- 방문 순서 그대로: 아침식사 → 관광지 → 이동 → 점심 → 관광지 → 저녁 순",
         "- 하루 총 7~10개 항목 (관광지 3~5개 + 식사 3개)",
         "- 같은 지역 거점 내 장소끼리 묶어 이동 최소화",
         "- 비 예보(강수확률 50% 이상): 실내 관광지 우선",
-        "- 1일차(신규): 출발편 도착 시간 이후부터 일정 시작 (항공 이동 항목 제외)",
+        "- 1일차(신규): 출발편이 당일 도착(+0일)이면 도착 시간 이후 활동 배정. (+1일) 이상이면 ordered_queries=[] (빈 리스트).",
+        "  (+1일) 이상 비행: 도착 다음 날짜(arrival_date)에 도착 후 활동 배정. 출발일에는 활동 없음.",
         "- 마지막 날(신규): 귀국편 탑승 2~3시간 전까지 일정 종료",
+        "- 도시 이동일: ordered_queries 최소화 (공항 이동 관련 장소만 또는 빈 리스트)",
         "- 검색어 형식: '장소명 도시명 (영문)' — Google Maps 검색에 사용",
         "  예) 'Senso-ji Temple Asakusa Tokyo', 'tonkotsu ramen Shinjuku Tokyo lunch'",
     ]
 
+    existing_plans = info.get("day_plans")
     if existing_plans:
         lines += ["", "## 기존 일정 (반드시 이 내용을 기준으로, 요청된 날짜만 수정할 것)"]
         for date_key, items in existing_plans.items():
             lines.append(f"### {date_key}")
             for item in items:
                 lines.append(f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})")
+
+    lines += ["", "## 항공편 데이터 (구간별)"]
+    for leg in d.flight_legs:
+        lines.append(
+            f"### leg_index={leg['leg_index']} ({leg['direction']}): "
+            f"{leg['from']} → {leg['to']}"
+        )
+        data = leg["data"]
+        if data.get("status") == "success":
+            for f in data.get("data", [])[:6]:
+                lines.append(
+                    f"  - {f.get('airline')} | {f.get('origin')}→{f.get('destination')} | "
+                    f"{f.get('departing_at','')} ~ {f.get('arriving_at','')} | "
+                    f"{f.get('price_krw',0):,}원 | {f.get('stops',0)}회 경유"
+                )
+        else:
+            lines.append("  - 검색 실패")
+
+    lines += ["", "## 숙소 데이터 (도시별)"]
+    for dest in destinations:
+        city = dest["city"]
+        hotel_data = d.hotels_by_city.get(city, {})
+        lines.append(f"### {city} ({dest['start_date']} ~ {dest['end_date']})")
+        if hotel_data.get("status") == "success":
+            for h in hotel_data.get("data", [])[:6]:
+                lines.append(
+                    f"  - {h.get('name')} | {h.get('address','')} | "
+                    f"{h.get('price_krw',0):,}원 | 평점 {h.get('rating','?')}"
+                )
+        else:
+            lines.append("  - 검색 실패")
+
+    lines += ["", "## 날씨 (도시별)"]
+    for dest in destinations:
+        city = dest["city"]
+        weather = d.weather_by_city.get(city, [])
+        if weather:
+            lines.append(f"### {city}")
+            for w in weather:
+                lines.append(
+                    f"  - {w.get('date')}: {w.get('weather','')} "
+                    f"최고{w.get('temperature_max', w.get('temperature_2m_max', '?'))}°C "
+                    f"강수{w.get('precipitation_probability_max', w.get('precipitation_sum', '?'))}%"
+                )
+
+    lines += ["", "## 여행지 정보 (도시별)"]
+    for dest in destinations:
+        city = dest["city"]
+        summary = d.web_summaries.get(city, "정보 없음")
+        lines += [f"### {city}", summary]
 
     if d.preferences:
         lines += ["", "## 사용자 취향", json.dumps(d.preferences, ensure_ascii=False, indent=2)]
@@ -203,48 +301,6 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
     if d.similar_messages:
         msgs = "\n".join(f"[{m['role']}] {m['content']}" for m in d.similar_messages)
         lines += ["", "## 참고할 과거 대화", msgs]
-
-    lines += ["", "## 날씨"]
-    for w in d.weather:
-        lines.append(
-            f"- {w.get('date')}: {w.get('weather','')} "
-            f"최고 {w.get('temperature_max', w.get('temperature_2m_max', '?'))}°C "
-            f"강수 {w.get('precipitation_probability_max', w.get('precipitation_sum', '?'))}%"
-        )
-
-    lines += ["", "## 항공편 — 출발편 옵션"]
-    if d.flights_depart.get("status") == "success":
-        for f in d.flights_depart.get("data", [])[:6]:
-            lines.append(
-                f"- {f.get('airline')} | {f.get('origin')}→{f.get('destination')} | "
-                f"{f.get('departing_at','')} ~ {f.get('arriving_at','')} | "
-                f"{f.get('price_krw',0):,}원 | {f.get('stops',0)}회 경유"
-            )
-    else:
-        lines.append("- 검색 실패")
-
-    lines += ["", "## 항공편 — 귀국편 옵션"]
-    if d.flights_return.get("status") == "success":
-        for f in d.flights_return.get("data", [])[:6]:
-            lines.append(
-                f"- {f.get('airline')} | {f.get('origin')}→{f.get('destination')} | "
-                f"{f.get('departing_at','')} ~ {f.get('arriving_at','')} | "
-                f"{f.get('price_krw',0):,}원 | {f.get('stops',0)}회 경유"
-            )
-    else:
-        lines.append("- 검색 실패")
-
-    lines += ["", "## 숙소 옵션"]
-    if d.hotels.get("status") == "success":
-        for h in d.hotels.get("data", [])[:8]:
-            lines.append(
-                f"- {h.get('name')} | {h.get('address','')} | "
-                f"{h.get('price_krw',0):,}원 | 평점 {h.get('rating','?')}"
-            )
-    else:
-        lines.append("- 검색 실패")
-
-    lines += ["", "## 여행지 정보", d.web_summary]
 
     return "\n".join(lines)
 
@@ -255,14 +311,15 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
 class SynthesizerDeps:
     itinerary_info: dict
     planner_output: PlannerOutput
-    place_results: dict[str, dict]   # query → search_place 결과
-    route_results: dict[str, dict]   # "orig||dest" → find_route 결과
-    weather: list[dict]
-    web_summary: str
+    place_results: dict[str, dict]      # query → search_place 결과
+    route_results: dict[str, dict]      # "orig||dest" → find_route 결과
+    weather_by_city: dict               # city → list[dict]
+    web_summaries: dict                 # city → 요약 텍스트
     preferences: dict | None
     ai_summary: str | None
     today: str
     similar_messages: list[dict]
+    attraction_prices: dict[str, str]   # place_name → Tavily 입장료 검색 결과 (없으면 {})
 
 
 synthesizer_agent = Agent(
@@ -276,24 +333,28 @@ synthesizer_agent = Agent(
 def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
     info = d.itinerary_info
     po = d.planner_output
+    destinations = info.get("destinations") or []
+    dest_str = " → ".join(dest["city"] for dest in destinations) if destinations else "여행지"
+    budget = info.get("budget")
+    adults = info.get("adult_count", 1)
+    children = info.get("child_count", 0)
+    total_people = adults + children
+
     print(
         f"\n[synthesizer_agent] _build_synthesizer_prompt 호출\n"
-        f"  destination={info.get('destination')}, start={info.get('start_date')}, end={info.get('end_date')}\n"
-        f"  budget={info.get('budget')}, adults={info.get('adult_count')}\n"
+        f"  destinations={dest_str}, start={destinations[0]['start_date'] if destinations else ''}, "
+        f"end={destinations[-1]['end_date'] if destinations else ''}\n"
+        f"  budget={budget}, adults={adults}\n"
         f"  ai_summary       : {d.ai_summary}\n"
         f"  preferences      : {d.preferences}\n"
         f"  similar_messages : {len(d.similar_messages)}건\n"
         f"  planner_output   : days={len(po.days)}일, flights={len(po.selected_flights)}편, hotels={len(po.selected_hotels)}개\n"
         f"  place_results    : {len(d.place_results)}건\n"
         f"  route_results    : {len(d.route_results)}건\n"
+        f"  attraction_prices: {len(d.attraction_prices)}건\n"
         f"  existing_day_plans: {list(info['day_plans'].keys()) if info.get('day_plans') else None}",
         flush=True,
     )
-    dest = info.get("destination", "여행지")
-    budget = info.get("budget")
-    adults = info.get("adult_count", 1)
-    children = info.get("child_count", 0)
-    total_people = adults + children
 
     lines = [
         "당신은 여행 일정 완성 전문가입니다.",
@@ -301,90 +362,127 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "완전한 OrchestratorResult를 작성하라.",
         "",
         "## 여행 기본 전제 (항상 준수)",
-        f"- 이 여행의 출발지는 대한민국이다. 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다.",
-        f"- 여행지: {dest}",
-        "- 1일차 첫 항목: 한국 공항에서 목적지로 출발하는 항공 이동 항목 (## 선택된 항공편의 depart 편 사용)",
-        "  예) plan_name='인천국제공항(ICN) → 도쿄 나리타(NRT) 항공 이동 (항공사명)', time='출발시간 ~ 도착시간'",
-        "- 마지막날 마지막 항목: 목적지에서 한국 공항으로 귀국하는 항공 이동 항목 (## 선택된 항공편의 return 편 사용)",
-        "  예) plan_name='도쿄 나리타(NRT) → 인천국제공항(ICN) 귀국 항공 (항공사명)', time='출발시간 ~ 도착시간'",
-        "- 항공 이동 항목 직전에는 공항 이동 항목 삽입 (출발 2~3시간 전 출발 기준)",
-        "  예) plan_name='숙소 → 인천국제공항 이동 (공항버스/택시)'",
+        "- 이 여행의 출발지는 대한민국이다. 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다.",
+        f"- 여행 경로: 한국 → {dest_str} → 한국",
+        "- 1일차 첫 항목: 한국 출발 항공 이동 (leg_index=0 depart 편 사용)",
+        "  당일 도착 예) time='09:00 ~ 11:30', note='총 비행시간 약 2h 30m | 시차 0h'",
+        "  다음날 도착 예) 출발일 time='11:30 ~ 24:00' / 도착일 첫 항목 time='24:00 ~ 16:45', cost=null",
+        "⚠️ 다음날 도착 항공(+1일) 처리 규칙 — 반드시 준수:",
+        "   출발일 day_plans 키: 공항 이동 항목 + 항공 이동 항목(time='출발시각 ~ 24:00')만 포함. 체크인·식사·관광 절대 금지.",
+        "   도착일 day_plans 첫 항목(반드시 추가): time='24:00 ~ 도착지현지시각', plan_name='[항공사] 기내 (비행 중) → [공항코드] 도착', cost=null",
+        "   도착일 이후 항목: 공항 → 숙소 이동 + 체크인 + 식사 등 도착 후 활동.",
+        "   예) '2026-12-20': [공항이동(time='09:00~11:00'), 항공이동(time='11:30~24:00', cost={price_original, currency})]",
+        "       '2026-12-21': [기내연속(time='24:00~16:45', cost=null), 공항→숙소이동, 체크인, 식사...]",
+        "- 도시 이동일 첫 항목: 도시 간 이동 항공 (해당 구간 connect 편 사용)",
+        "  예) plan_name='파리 샤를드골(CDG) → 로마 피우미치노(FCO) 항공 이동 (항공사명)'",
+        "- 마지막날 마지막 항목: 한국 귀국 항공 이동 (return 편 사용)",
+        "  예) plan_name='로마 피우미치노(FCO) → 인천국제공항(ICN) 귀국 항공 (항공사명)'",
+        "- 각 항공 이동 항목 직전: 공항 이동 항목 삽입 (출발 2~3시간 전 기준, 새벽 출발이면 심야 이동도 그대로 기재)",
+        "  예) plan_name='숙소 → 인천국제공항 이동 (공항버스/택시)', time='01:30 ~ 03:00'",
+        "",
+        "## 도시별 일정 배정",
+    ]
+    for dest in destinations:
+        lines.append(f"- {dest['city']}: {dest['start_date']} ~ {dest['end_date']}")
+
+    lines += [
         "",
         "## 필수 출력",
         "- `message`: 아래 기준으로 작성한다.",
         "  - 기존 일정(## 기존 일정)이 없으면 신규 생성: 날짜별 주요 코스를 간략히 소개한다.",
-        "    예) '1일차는 아사쿠사 → 센소지 → 나카미세 거리 코스로, 저녁에는 원하신 참치회 식당을 배치했습니다. 2일차는 신주쿠 쇼핑 코스로 구성했습니다.'",
+        f"    예) '1일차는 {destinations[0]['city'] if destinations else '첫 번째 도시'} 도착 후 시내 탐방, 2일차는..."
+        if destinations else "    예) '1일차는 도착 후 시내 탐방...'",
         "  - 기존 일정(## 기존 일정)이 있으면 수정: 반영한 요청과 변경 결과를 구체적으로 설명한다.",
-        "    예) '해산물 요청을 반영해 1일차 저녁을 해산물 식당으로 변경했습니다. 3일차에는 시장 방문 코스를 새로 추가했습니다.'",
         "- `day_plans`: 키='YYYY-MM-DD'. 신규 생성이면 모든 날짜, 수정이면 요청된 날짜만 반환 (나머지는 포함하지 않는다).",
+        "  ⚠️ 신규 생성 시: start_date부터 end_date까지 하루도 빠짐없이 모든 날짜가 키에 있어야 한다.",
+        "  이동일·경유일·항공 탑승일도 포함. 활동이 없으면 이동 항목 1개라도 반드시 추가.",
         "- `ai_summary`: 번호 목록 형식으로 작성한다.",
         "  형식: 각 항목을 '1. 2. 3.' 번호로 나열. 항목당 한 줄로 핵심 사실만 기술.",
-        "  예) '1. 제주도 3박 4일 일정 생성 (5월 1일~3일, 성인 2명, 예산 30만원)\\n2. 1일차 저녁 해산물 식당 요청 반영\\n3. 숙소: 제주 그랜드 호텔 (5월 1일~3일)'",
         "  이전 대화 요약(## 이전 대화 요약)이 있으면 기존 항목을 유지하고 이번 내용을 새 번호로 추가한다.",
         "- `preferences`: 아래 [## preferences 추출 규칙] 참고. 반드시 작성할 것.",
         "",
         "## preferences 추출 규칙",
-        "⚠️ 반드시 지켜야 할 원칙: **사용자가 직접 말한 내용(사용자 메시지)에서만 추출한다.**",
-        "AI가 생성한 일정 내용(day_plans, 관광지 목록, 여행 스타일 등)을 보고 취향을 역추론하지 말 것.",
-        "예) 사용자가 '1일차에 참치회 먹고 싶어'라고만 했으면 food: ['참치회']만 기록.",
-        "    AI가 일정에 '동물원'을 넣었다고 해서 activities에 '동물원'을 추가하면 안 됨.",
-        "",
-        "추출 가능한 카테고리 (키 예시):",
-        "- food: 사용자가 직접 언급한 음식·식재료 (예: ['참치회', '규카츠'])",
-        "- food_avoid: 사용자가 싫다고 한 음식 (예: '고수')",
-        "- transport: 사용자가 선호한다고 말한 이동 수단",
-        "- accommodation: 사용자가 선호한다고 말한 숙박 스타일",
-        "- activities: 사용자가 하고 싶다고 말한 활동",
-        "- pace: 사용자가 원한다고 말한 여행 속도",
-        "- budget_style: 사용자가 언급한 예산 방식",
-        "- 그 외 사용자가 직접 말한 취향도 적절한 키로 추가한다.",
-        "",
+        "⚠️ 반드시 지켜야 할 원칙: **사용자가 직접 말한 내용에서만 추출한다.**",
+        "AI가 생성한 일정 내용을 보고 취향을 역추론하지 말 것.",
+        "추출 가능한 카테고리: food, food_avoid, transport, accommodation, activities, pace, budget_style 등.",
         "기존 ## 사용자 취향이 있으면 그 내용을 포함한 전체 dict를 반환한다.",
-        "사용자 메시지에서 새로 감지된 취향이 없고 기존 취향도 없으면 빈 dict {}를 반환한다.",
-        '출력 예시 (사용자가 "참치회랑 규카츠 먹고 싶어"라고 했을 때): {"food": ["참치회", "규카츠"]}',
+        "새로 감지된 취향이 없고 기존 취향도 없으면 빈 dict {}를 반환한다.",
         "",
         "## day_plans 각 항목 형식",
-        '{"plan_name":"...", "time":"HH:MM ~ HH:MM", "place":"...", "note":"...", "cost":null 또는 {"amount":숫자,"currency":"코드","amount_krw":정수또는null}}',
+        '{"plan_name":"...", "time":"HH:MM ~ HH:MM", "place":"...", "note":"...", "cost":null 또는 {"amount":숫자,"currency":"코드"} 또는 {"amount":숫자,"currency":"비KRW코드","amount_krw":정수}}',
+        '  ※ currency="KRW"이면 amount_krw 생략. 식사·교통·입장료는 amount_krw 생략.',
         "",
         "## time 필드 규칙 — 반드시 준수",
         '⚠️ time은 반드시 "HH:MM ~ HH:MM" 형식의 24시간제 숫자만 사용한다.',
-        "⚠️ '익일 아침', '다음날', '오전 중' 같은 텍스트 표현은 절대 사용 금지.",
-        "⚠️ 자정을 넘는 항공편(예: 23:50 출발 → 01:30 도착)도 반드시 숫자로만 표기:",
-        "   출발 당일 항목: time='23:50 ~ 24:00' (당일 자정까지만)",
-        "   도착 다음 날 항목: 해당 날짜의 day_plans에 '00:00 ~ 01:30'으로 별도 항목 추가",
-        "올바른 예) '09:00 ~ 10:30', '23:30 ~ 24:00', '00:00 ~ 02:15'",
-        "잘못된 예) '익일 아침', '다음날 도착', '오전 중', '저녁 무렵'",
+        "⚠️ '익일 아침', '다음날', '오전 중', '(+1일)', '(+2일)' 같은 텍스트 표현은 time 필드에 절대 사용 금지.",
+        "⚠️ 시각 기준 원칙: 모든 time 필드는 해당 활동이 이루어지는 장소의 현지 시각 기준.",
+        "   한국 내 활동(출발 준비, 공항 이동, 귀국 후): KST(UTC+9)",
+        "   해외 목적지 활동(관광, 식사, 이동, 체크인 등): 해당 도시 현지 시각",
+        "   예) 런던 관광 10:00~12:00(GMT): time='10:00 ~ 12:00'  /  취리히 식사 19:30(CET): time='19:30 ~ 21:00'",
+        "⚠️ 항공 이동 항목 시각 규칙: 출발 = 출발지 현지 시각, 도착 = 도착지 현지 시각.",
+        "   당일 도착: time='출발지현지시각 ~ 도착지현지시각'  예) '09:00 ~ 11:30'",
+        "   다음날 도착: 출발일 time='출발지현지시각 ~ 24:00'  예) '11:30 ~ 24:00'",
+        "   (도착일 첫 항목으로 '24:00 ~ 도착지현지시각' 기내 연속 항목 추가 — 위 (+1일) 규칙 참고)",
+        "   항공 이동 항목 note에 반드시 포함: '출발 HH:MM (공항코드, 시간대) | 도착 HH:MM (공항코드, 시간대) | 총 비행시간 약 Xh Ym | 시차 ±Yh'",
+        "   예) note='출발 11:30 ICN (KST+9) | 도착 16:45 STN (GMT+0) | 총 비행시간 약 13h 15m | 시차 -9h'",
+        "⚠️ 비행시간 계산: departing_at ~ arriving_at의 UTC 시각 차이로 계산. 현지 시각으로 빼면 시차 오류 — 절대 금지.",
+        "   예) departing_at='2026-12-22T11:00:00+09:00'(UTC 02:00), arriving_at='2026-12-22T13:30:00+01:00'(UTC 12:30)",
+        "       비행시간 = 12:30 - 02:00 = 10h 30m  (현지 차이 2h 30m로 계산하면 틀림)",
+        "⚠️ 항공 외 일반 일정은 자정을 넘으면 별도 항목 분리.",
+        "올바른 예) '09:00 ~ 10:30', '23:50 ~ 24:00', '24:00 ~ 06:20', '00:00 ~ 02:15'",
         "",
         "## 식사 배치 규칙",
         "- 일반 날: 아침(08:00~09:00), 점심(12:00~13:30), 저녁(18:30~20:00) 3회 포함",
-        "- 항공 도착 날 (1일차 신규 생성): 도착 시간 + 시내 이동(약 1.5h) 이후부터 가능한 첫 식사부터 시작",
-        "  예) 도착 11:27 → 시내 이동 13:00 완료 → 점심부터 시작 (아침 생략)",
-        "      도착 14:30 → 시내 이동 16:00 완료 → 저녁 1회만",
-        "      도착 07:00 → 시내 이동 08:30 완료 → 아침부터 3회 정상 배치",
-        "- 항공 출발 날 (마지막 날 신규 생성): 탑승 시간 2~3시간 전까지 일정 종료, 그 이후 식사 생략",
-        "  예) 탑승 18:00 → 15:00 전까지 → 아침·점심 후 종료 (저녁 생략)",
-        "      탑승 09:00 → 06:00 전까지 → 아침 간단히 후 공항 이동",
+        "- 항공 도착 날: 도착 시간 + 시내 이동(약 1.5h) 이후부터 가능한 첫 식사부터 시작",
+        "- 항공 출발 날: 탑승 시간 2~3시간 전까지 일정 종료, 그 이후 식사 생략",
         "- 이동 5분 이상: 별도 이동 항목 삽입 (plan_name: '{출발} → {도착} 이동 ({수단})')",
+        "- 이동 수단: 대중교통(지하철·버스·트램) / 도보 / 택시. 렌터카는 절대 이동 항목으로 넣지 않는다.",
         "- 비 예보 날: 실내 위주 배치 후 note에 날씨 안내",
         "",
         "## cost 작성 규칙",
-        "⚠️ 모든 cost는 '전체 금액' 기준. 1인 기준이 아님.",
+        "⚠️ 모든 cost는 전체 인원 합산 금액 기준.",
         "⚠️ cost=null은 진짜 무료인 경우만. 금액 모를 때도 null. 절대 0 금액 쓰지 말 것.",
+        "⚠️ currency='KRW'이면 amount_krw 필드를 절대 작성하지 말 것 (생략 = null).",
+        "⚠️ 식사·교통·입장료는 amount_krw 절대 작성 금지 — 서버가 자동 환산함.",
         "",
-        "- 항공 이동 항목: ## 선택된 항공편의 price_original·currency·price_krw 값을 그대로 사용",
-        "  (탑승객 전원 합산 금액. currency는 반드시 항공편 데이터의 값 사용, 임의로 변경 금지)",
-        '  예) 항공편 데이터가 price_original=85000, currency="JPY", price_krw=780000이면',
-        '      → cost: {"amount": 85000, "currency": "JPY", "amount_krw": 780000}',
+        "- 항공 이동 항목: API 검색 결과의 price_original·currency 그대로 사용. cost=null 절대 금지.",
+        "  ⚠️ '선택된 항공편' 섹션에서 해당 leg_index의 price_original·currency·price_krw를 반드시 찾아 기재.",
+        "  (API가 성인/아이 요금을 구분해 이미 합산한 금액을 반환함 — 인원 수 곱하기 금지)",
+        "  price_krw가 있고 currency != 'KRW'이면 amount_krw에 기입. currency='KRW'이면 amount_krw 생략.",
+        '  예) currency="JPY", price_original=85000, price_krw=780000',
+        '      → {"amount": 85000, "currency": "JPY", "amount_krw": 780000}',
+        '  예) currency="KRW", price_original=775570',
+        '      → {"amount": 775570, "currency": "KRW"}  ← amount_krw 없음',
         "",
-        "- 숙소 체크인 항목: 1박 금액(price_original, price_krw) × 박 수로 전체 숙박 금액 계산",
-        "  박 수 = ## 선택된 숙소의 check_out - check_in 일수. price_krw가 없으면 cost=null",
-        '  예) price_original=13000 JPY, price_krw=120000원, 3박이면',
-        '      → cost: {"amount": 39000, "currency": "JPY", "amount_krw": 360000}',
+        "- 숙소 체크인 항목: API 검색 결과의 price_original·currency 그대로 사용.",
+        "  (API가 전체 숙박 기간 합산 금액을 반환함 — 박 수 곱하기 금지)",
+        "  currency != 'KRW'이고 price_krw 있으면 amount_krw에 기입. price_krw 없으면 cost=null.",
+        '  예) currency="EUR", price_original=300, price_krw=453000',
+        '      → {"amount": 300, "currency": "EUR", "amount_krw": 453000}',
         "",
-        f"- 식사·교통·입장료: 현지 물가 기준 1인 추정액 × {total_people}명(총 인원). amount_krw 생략(자동 환산)",
-        f'  예) 1인당 라멘 1,200엔 × {total_people}명: {{"amount": {1200 * total_people}, "currency": "JPY"}}',
-        f'      1인당 지하철 200엔 × {total_people}명: {{"amount": {200 * total_people}, "currency": "JPY"}}',
-        "- 국내(한국) 비용: currency='KRW', amount_krw=null",
+        "- 식사: 현지 물가 기준 1인 추정액 × 전체 인원. amount_krw 절대 작성 금지.",
+        f"  성인 {adults}명 + 어린이 {children}명 = 총 {total_people}명",
+        "",
+        "- 대중교통(지하철·버스·트램 등): 동선 결과에 fare(1인 요금)가 있으면 반드시 그 값 사용. amount_krw 절대 작성 금지.",
+        f"  fare 있음: 성인 요금(fare.value) × {adults} + 어린이 요금(fare.value × 0.5~0.7) × {children}",
+        f"  fare 없음: 현지 물가 기준 추정. 성인 요금 × {adults} + 어린이 요금(성인의 약 50~70%) × {children}",
+        "  5세 이하 무료인 경우 많음. 무료 확실하면 cost=null.",
+        "- 택시: 1대 요금(인원 무관, 탑승 인원 곱하기 금지). 동선 결과의 distance_text 기준으로 아래 참고 요금 적용.",
+        "  서울 기본 4,800원 + 약 100원/100m | 도쿄 730JPY + 약 100JPY/300m",
+        "  파리 4EUR + 약 1.5EUR/km | 뉴욕 3USD + 약 2USD/km | 방콕 35THB + 약 6THB/km",
+        "  distance_text 없으면 현지 물가 기준 추정. amount_krw 절대 작성 금지.",
+        "- 입장료: Tavily 검색 결과가 있으면 그 값 우선 사용. 없으면 price_level(0=무료·1=저렴·2=보통·3=비쌈·4=매우 비쌈) 참고해 추정.",
+        "  price_level=0이면 cost=null. 성인·아이 요금 구분 적용. amount_krw 절대 작성 금지.",
+        "",
+        "  ⚠️ 통화별 단가 규모 — 반드시 이 범위를 지킬 것:",
+        "     EUR: 식사 1인당 15~50 EUR / 지하철 1인당 2~5 EUR / 입장료 1인당 10~30 EUR",
+        "     USD: 식사 1인당 15~50 USD / 지하철 1인당 2~5 USD",
+        "     JPY: 식사 1인당 800~3,000 JPY / 지하철 1인당 200~600 JPY / 입장료 1인당 500~2,000 JPY",
+        "     KRW: 식사 1인당 8,000~20,000 KRW / 지하철 1인당 1,400~2,000 KRW",
+        f'  예) 뮌헨 저녁 성인 1인 35 EUR × {adults}명 + 어린이 25 EUR × {children}명',
+        f'      → {{"amount": {35 * adults + 25 * children}, "currency": "EUR"}}',
+        f'  예) 도쿄 지하철 성인 230 JPY × {adults}명 + 어린이 120 JPY × {children}명',
+        f'      → {{"amount": {230 * adults + 120 * children}, "currency": "JPY"}}',
         "- 무료(공원·야경·산책 등): cost=null",
     ]
 
@@ -399,7 +497,8 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
     lines += ["", "## 선택된 항공편"]
     for fl in po.selected_flights:
         lines.append(
-            f"- [{fl.direction}] {fl.airline} | {fl.origin}→{fl.destination} | "
+            f"- [leg_index={fl.leg_index}, {fl.direction}] {fl.airline} | "
+            f"{fl.origin}→{fl.destination} | "
             f"{fl.departing_at} ~ {fl.arriving_at} | {fl.price_krw:,}원 ({fl.currency} {fl.price_original})"
         )
 
@@ -411,13 +510,18 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
             f"{h.check_in} ~ {h.check_out} | {price_str} ({h.currency} {h.price_original})"
         )
 
-    lines += ["", "## 날씨"]
-    for w in d.weather:
-        lines.append(
-            f"- {w.get('date')}: {w.get('weather','')} "
-            f"최고{w.get('temperature_max', w.get('temperature_2m_max','?'))}°C "
-            f"강수{w.get('precipitation_probability_max', w.get('precipitation_sum','?'))}%"
-        )
+    lines += ["", "## 날씨 (도시별)"]
+    for dest in destinations:
+        city = dest["city"]
+        weather = d.weather_by_city.get(city, [])
+        if weather:
+            lines.append(f"### {city}")
+            for w in weather:
+                lines.append(
+                    f"  - {w.get('date')}: {w.get('weather','')} "
+                    f"최고{w.get('temperature_max', w.get('temperature_2m_max','?'))}°C "
+                    f"강수{w.get('precipitation_probability_max', w.get('precipitation_sum','?'))}%"
+                )
 
     lines += ["", "## 장소 검색 결과 (search_place)"]
     for query, result in d.place_results.items():
@@ -425,10 +529,17 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
             places = result.get("data", {}).get("places", [])
             if places:
                 p = places[0]
+                price_label = p.get("price_level_label")
+                price_str = f" | 가격대: {price_label}(0~4 상대 척도)" if price_label else ""
                 lines.append(
                     f"- [{query}] → {p.get('name')} | {p.get('formatted_address','')} | "
-                    f"평점 {p.get('rating','?')} ({p.get('user_ratings_total','?')}명)"
+                    f"평점 {p.get('rating','?')} ({p.get('user_ratings_total','?')}명){price_str}"
                 )
+
+    if d.attraction_prices:
+        lines += ["", "## 관광지 입장료 (Tavily 검색 결과 — 텍스트 내 금액 활용)"]
+        for name, content in d.attraction_prices.items():
+            lines.append(f"- {name}: {content[:300]}")
 
     lines += ["", "## 동선 결과 (find_route)"]
     for key, result in d.route_results.items():
@@ -437,7 +548,9 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
             routes = result.get("data", {}).get("routes", [])
             if routes:
                 r = routes[0]
-                lines.append(f"- {orig} → {dest_place}: {r.get('duration','')} ({r.get('distance','')})")
+                fare = r.get("fare")
+                fare_info = f" | 1인 요금: {fare['text']} ({fare['currency']})" if fare else ""
+                lines.append(f"- {orig} → {dest_place}: {r.get('duration_text','')} ({r.get('distance_text','')}){fare_info}")
 
     if budget:
         lines += ["", f"## 예산 제약: 총 {budget:,.0f}원 (성인 {adults}명 기준)"]
@@ -450,17 +563,21 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         msgs = "\n".join(f"[{m['role']}] {m['content']}" for m in d.similar_messages)
         lines += ["", "## 참고할 과거 대화", msgs]
 
-    lines += ["", "## 여행지 정보 요약", d.web_summary]
+    lines += ["", "## 여행지 정보 요약 (도시별)"]
+    for dest in destinations:
+        city = dest["city"]
+        summary = d.web_summaries.get(city, "정보 없음")
+        lines += [f"### {city}", summary]
 
     return "\n".join(lines)
 
 
 # ── Phase 1 헬퍼 함수들 ──────────────────────────────────────────────────
 
-async def _fetch_web_summary(destination: str, preferences: dict | None) -> str:
+async def _fetch_web_summary(city: str, preferences: dict | None) -> str:
     queries = [
-        f"{destination} tourist attractions sightseeing must-visit",
-        f"{destination} local food restaurants best places to eat",
+        f"{city} tourist attractions sightseeing must-visit",
+        f"{city} local food restaurants best places to eat",
     ]
     raw_list = await asyncio.gather(
         *[_service.process_task("tavily_search", "search", {
@@ -476,7 +593,7 @@ async def _fetch_web_summary(destination: str, preferences: dict | None) -> str:
             if item.get("score", 0) >= 0.4:
                 snippets.append(f"[{item['title']}]\n{item['content']}")
     if not snippets:
-        return f"{destination} 여행 정보를 찾지 못했습니다."
+        return f"{city} 여행 정보를 찾지 못했습니다."
     combined = "\n\n".join(snippets[:10])
     pref_hint = ""
     if preferences:
@@ -487,9 +604,22 @@ async def _fetch_web_summary(destination: str, preferences: dict | None) -> str:
     return result.output
 
 
-async def _fetch_weather(destination: str, start_date: str, end_date: str, today: str) -> list[dict]:
+async def _fetch_web_summaries(destinations: list[dict], preferences: dict | None) -> dict[str, str]:
+    """모든 목적지의 웹 요약을 병렬로 수집한다. 반환: {city → 요약}"""
+    cities = [d["city"] for d in destinations]
+    results = await asyncio.gather(
+        *[_fetch_web_summary(city, preferences) for city in cities],
+        return_exceptions=True,
+    )
+    return {
+        city: (r if not isinstance(r, Exception) else f"{city} 여행 정보를 찾지 못했습니다.")
+        for city, r in zip(cities, results)
+    }
+
+
+async def _fetch_weather(city: str, start_date: str, end_date: str, today: str) -> list[dict]:
     try:
-        city = destination.split(",")[0].strip()
+        city_short = city.split(",")[0].strip()
         start_dt = datetime.strptime(start_date[:10], "%Y-%m-%d").date()
         end_dt = datetime.strptime(end_date[:10], "%Y-%m-%d").date()
         today_dt = datetime.strptime(today[:10], "%Y-%m-%d").date()
@@ -498,14 +628,14 @@ async def _fetch_weather(destination: str, start_date: str, end_date: str, today
 
         if days_until <= 16:
             result = await _service.process_task("weather", "get_weather", {
-                "city": city,
+                "city": city_short,
                 "forecast_days": min(total_days, 16),
             })
         else:
             last_year_start = start_dt.replace(year=start_dt.year - 1)
             last_year_end = end_dt.replace(year=end_dt.year - 1)
             result = await _service.process_task("weather", "get_historical_weather", {
-                "city": city,
+                "city": city_short,
                 "start_date": str(last_year_start),
                 "end_date": str(last_year_end),
             })
@@ -514,37 +644,82 @@ async def _fetch_weather(destination: str, start_date: str, end_date: str, today
         return []
 
 
-async def _fetch_flights(
-    city: str, start_date: str, end_date: str,
-    adults: int, children: int, child_ages: list,
-) -> tuple[dict, dict]:
-    depart, ret = await asyncio.gather(
-        _service.process_task("duffel_flight", "search_flights", {
-            "origin": _DEFAULT_ORIGIN, "destination": city,
-            "departure_date": start_date[:10],
-            "adults": adults, "children": children, "child_ages": child_ages,
-        }),
-        _service.process_task("duffel_flight", "search_flights", {
-            "origin": city, "destination": _DEFAULT_ORIGIN,
-            "departure_date": end_date[:10],
-            "adults": adults, "children": children, "child_ages": child_ages,
-        }),
+async def _fetch_weather_all(destinations: list[dict], today: str) -> dict[str, list[dict]]:
+    """모든 목적지의 날씨를 병렬로 수집한다. 반환: {city → list[dict]}"""
+    results = await asyncio.gather(
+        *[_fetch_weather(d["city"], d["start_date"], d["end_date"], today) for d in destinations],
         return_exceptions=True,
     )
-    if isinstance(depart, Exception):
-        depart = {"status": "error", "message": str(depart)}
-    if isinstance(ret, Exception):
-        ret = {"status": "error", "message": str(ret)}
-    return depart, ret
+    return {
+        d["city"]: (r if not isinstance(r, Exception) else [])
+        for d, r in zip(destinations, results)
+    }
+
+
+async def _fetch_flight_legs(
+    destinations: list[dict],
+    cities_en: list[str],
+    adults: int,
+    children: int,
+    child_ages: list,
+) -> list[dict]:
+    """모든 항공 구간을 병렬로 검색한다.
+
+    구간 구성 (N개 도시):
+      leg 0       : 한국(Seoul) → cities_en[0]          depart
+      leg 1..N-1  : cities_en[i-1] → cities_en[i]       connect
+      leg N       : cities_en[-1] → 한국(Seoul)          return
+    """
+    leg_info: list[dict] = []
+    tasks = []
+
+    # Depart
+    tasks.append(_service.process_task("duffel_flight", "search_flights", {
+        "origin": _DEFAULT_ORIGIN,
+        "destination": cities_en[0],
+        "departure_date": destinations[0]["start_date"][:10],
+        "adults": adults, "children": children, "child_ages": child_ages,
+    }))
+    leg_info.append({"leg_index": 0, "direction": "depart", "from": _DEFAULT_ORIGIN, "to": cities_en[0]})
+
+    # Connect legs
+    for i in range(1, len(destinations)):
+        tasks.append(_service.process_task("duffel_flight", "search_flights", {
+            "origin": cities_en[i - 1],
+            "destination": cities_en[i],
+            "departure_date": destinations[i]["start_date"][:10],
+            "adults": adults, "children": children, "child_ages": child_ages,
+        }))
+        leg_info.append({"leg_index": i, "direction": "connect", "from": cities_en[i - 1], "to": cities_en[i]})
+
+    # Return
+    tasks.append(_service.process_task("duffel_flight", "search_flights", {
+        "origin": cities_en[-1],
+        "destination": _DEFAULT_ORIGIN,
+        "departure_date": destinations[-1]["end_date"][:10],
+        "adults": adults, "children": children, "child_ages": child_ages,
+    }))
+    leg_info.append({"leg_index": len(destinations), "direction": "return", "from": cities_en[-1], "to": _DEFAULT_ORIGIN})
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    return [
+        {**info, "data": (r if not isinstance(r, Exception) else {"status": "error", "message": str(r)})}
+        for info, r in zip(leg_info, results)
+    ]
 
 
 async def _fetch_hotels(
-    city: str, start_date: str, end_date: str,
-    adults: int, children: int, child_ages: list,
+    city_en: str,
+    start_date: str,
+    end_date: str,
+    adults: int,
+    children: int,
+    child_ages: list,
 ) -> dict:
     try:
         return await _service.process_task("duffel_accommodation", "search_hotels", {
-            "city_name": city,
+            "city_name": city_en,
             "check_in": start_date[:10],
             "check_out": end_date[:10],
             "adults": adults,
@@ -553,6 +728,25 @@ async def _fetch_hotels(
         })
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+async def _fetch_hotels_all(
+    cities_en: list[str],
+    destinations: list[dict],
+    adults: int,
+    children: int,
+    child_ages: list,
+) -> dict[str, dict]:
+    """모든 목적지의 숙소를 병렬로 검색한다. 반환: {city(한국어) → 숙소 결과}"""
+    results = await asyncio.gather(
+        *[_fetch_hotels(city_en, d["start_date"], d["end_date"], adults, children, child_ages)
+          for city_en, d in zip(cities_en, destinations)],
+        return_exceptions=True,
+    )
+    return {
+        d["city"]: (r if not isinstance(r, Exception) else {"status": "error"})
+        for d, r in zip(destinations, results)
+    }
 
 
 # ── Phase 3 헬퍼 함수들 ──────────────────────────────────────────────────
@@ -571,6 +765,53 @@ async def _fetch_places(planner_output: PlannerOutput) -> dict[str, dict]:
         q: (r if not isinstance(r, Exception) else {"status": "error"})
         for q, r in zip(queries, results)
     }
+
+
+_ATTRACTION_TYPES = frozenset({
+    "tourist_attraction", "museum", "amusement_park", "zoo", "aquarium",
+    "art_gallery", "stadium", "bowling_alley", "movie_theater",
+})
+
+
+async def _fetch_attraction_prices(place_results: dict[str, dict]) -> dict[str, str]:
+    """attraction 타입 + price_level > 0 장소의 입장료를 Tavily로 검색."""
+    queries: dict[str, str] = {}
+    for result in place_results.values():
+        if result.get("status") != "success":
+            continue
+        places = result.get("data", {}).get("places", [])
+        if not places:
+            continue
+        p = places[0]
+        if not (_ATTRACTION_TYPES & set(p.get("types", []))):
+            continue
+        price_level = p.get("price_level")
+        if price_level is None or price_level == 0:
+            continue
+        name = p.get("name", "")
+        if name and name not in queries:
+            queries[name] = f"{name} admission fee entrance ticket price 2026"
+
+    if not queries:
+        return {}
+
+    print(f"\n[_fetch_attraction_prices] {len(queries)}개 관광지 입장료 검색: {list(queries.keys())}", flush=True)
+    results = await asyncio.gather(
+        *[_service.process_task("tavily_search", "search", {
+            "query": q, "search_depth": "basic", "max_results": 3,
+        }) for q in queries.values()],
+        return_exceptions=True,
+    )
+
+    attraction_prices: dict[str, str] = {}
+    for name, result in zip(queries.keys(), results):
+        if isinstance(result, Exception) or result.get("status") != "success":
+            continue
+        items = result.get("data", [])
+        if items:
+            attraction_prices[name] = items[0].get("content", "")[:400]
+
+    return attraction_prices
 
 
 def _best_address(place_result: dict) -> str | None:
@@ -595,7 +836,7 @@ async def _fetch_routes(
             _best_address(place_results.get(q, {}))
             for q in day.ordered_queries
         ]
-        addrs = [a for a in addrs if a]  # None 제거
+        addrs = [a for a in addrs if a]
         for i in range(len(addrs) - 1):
             key = f"{addrs[i]}||{addrs[i+1]}"
             if key not in seen:
@@ -619,60 +860,88 @@ async def _fetch_routes(
 
 # ── 메인 파이프라인 ───────────────────────────────────────────────────────
 
+def _estimate_total_krw(day_plans: dict) -> int:
+    """day_plans의 모든 cost를 원화로 합산. amount_krw 없는 외화 항목은 제외(보수적 추정)."""
+    total = 0
+    for items in day_plans.values():
+        for item in items:
+            cost = item.cost if hasattr(item, "cost") else item.get("cost")
+            if cost is None:
+                continue
+            currency = cost.currency if hasattr(cost, "currency") else cost.get("currency")
+            amount = cost.amount if hasattr(cost, "amount") else cost.get("amount", 0)
+            amount_krw = cost.amount_krw if hasattr(cost, "amount_krw") else cost.get("amount_krw")
+            if currency == "KRW":
+                total += int(amount)
+            elif amount_krw is not None:
+                total += int(amount_krw)
+    return total
+
+
 async def run_itinerary_pipeline(
     deps,           # OrchestratorDeps
     user_message: str,
     history: list,
 ) -> AsyncGenerator[str | OrchestratorResult, None]:
     """
-    current_itinerary(destination, dates, adults 등)가 없으면 아무것도 yield하지 않고 종료.
+    destinations 배열이 없거나 start_date가 없으면 아무것도 yield하지 않고 종료.
     호출자는 OrchestratorResult를 받지 못하면 orchestrator로 폴백한다.
     """
     itinerary = deps.current_itinerary
-    if not itinerary or not itinerary.get("destination") or not itinerary.get("start_date"):
+    if not itinerary:
         return
 
-    destination = itinerary["destination"]
-    start_date = itinerary["start_date"]
-    end_date = itinerary.get("end_date", start_date)
+    destinations = itinerary.get("destinations") or []
+    if not destinations or not itinerary.get("start_date"):
+        return
+
     adults = itinerary.get("adult_count") or 1
     children = itinerary.get("child_count") or 0
     child_ages = itinerary.get("child_ages") or []
+    budget = itinerary.get("budget")
 
-    # 도시명 영문 변환 — _fetch_flights·_fetch_hotels 양쪽이 재사용
-    city_en = await _extract_english_city(destination)
+    # 도시명 영문 변환 (전체 목적지 일괄 처리 — 단일 LLM 호출)
+    cities_kr = [d["city"] for d in destinations]
+    cities_en = await _extract_english_cities(cities_kr)
+
+    print(
+        f"\n[run_itinerary_pipeline] 파이프라인 시작"
+        f"\n  destinations : {cities_kr}"
+        f"\n  cities_en    : {cities_en}"
+        f"\n  start={destinations[0]['start_date']}, end={destinations[-1]['end_date']}"
+        f"\n  adults={adults}, children={children}",
+        flush=True,
+    )
 
     # ── Phase 1: 병렬 데이터 수집 ──────────────────────────────────────
-    web_summary, weather, (flights_depart, flights_return), hotels = await asyncio.gather(
-        _fetch_web_summary(destination, deps.preferences),
-        _fetch_weather(destination, start_date, end_date, deps.today),
-        _fetch_flights(city_en, start_date, end_date, adults, children, child_ages),
-        _fetch_hotels(city_en, start_date, end_date, adults, children, child_ages),
+    web_summaries, weather_by_city, flight_legs, hotels_by_city = await asyncio.gather(
+        _fetch_web_summaries(destinations, deps.preferences),
+        _fetch_weather_all(destinations, deps.today),
+        _fetch_flight_legs(destinations, cities_en, adults, children, child_ages),
+        _fetch_hotels_all(cities_en, destinations, adults, children, child_ages),
+    )
+
+    print(
+        f"\n[run_itinerary_pipeline] Phase 1 완료"
+        f"\n  web_summaries  : {list(web_summaries.keys())}"
+        f"\n  weather_by_city: {[(k, len(v)) for k, v in weather_by_city.items()]}"
+        f"\n  flight_legs    : {[(l['direction'], l['data'].get('status')) for l in flight_legs]}"
+        f"\n  hotels_by_city : {[(k, v.get('status')) for k, v in hotels_by_city.items()]}",
+        flush=True,
     )
 
     # ── Phase 2: 플래너 LLM 1회 ────────────────────────────────────────
     planner_deps = PlannerDeps(
         itinerary_info=itinerary,
-        web_summary=web_summary,
-        weather=weather,
-        flights_depart=flights_depart,
-        flights_return=flights_return,
-        hotels=hotels,
+        web_summaries=web_summaries,
+        weather_by_city=weather_by_city,
+        flight_legs=flight_legs,
+        hotels_by_city=hotels_by_city,
+        cities_en=cities_en,
         preferences=deps.preferences,
         ai_summary=deps.ai_summary,
         today=deps.today,
         similar_messages=deps.similar_messages,
-    )
-    print(
-        f"\n[run_itinerary_pipeline] PlannerDeps 조립 완료"
-        f"\n  destination={itinerary.get('destination')}, start={itinerary.get('start_date')}, end={itinerary.get('end_date')}"
-        f"\n  ai_summary  : {deps.ai_summary}"
-        f"\n  preferences : {deps.preferences}"
-        f"\n  weather     : {len(weather)}건"
-        f"\n  flights_depart status={flights_depart.get('status')}"
-        f"\n  flights_return status={flights_return.get('status')}"
-        f"\n  hotels status={hotels.get('status')}",
-        flush=True,
     )
     planner_context = _build_planner_prompt(planner_deps)
     planner_result = await planner_agent.run(
@@ -682,9 +951,28 @@ async def run_itinerary_pipeline(
     )
     planner_output: PlannerOutput = planner_result.output
 
-    # ── Phase 3: 장소 검색 + 동선 병렬 ────────────────────────────────
+    print(
+        f"\n[run_itinerary_pipeline] Phase 2 완료"
+        f"\n  days={len(planner_output.days)}일"
+        f"\n  flights={len(planner_output.selected_flights)}편"
+        f"\n  hotels={len(planner_output.selected_hotels)}개",
+        flush=True,
+    )
+
+    # ── Phase 3: 장소 검색 + 동선 + 관광지 입장료 병렬 ─────────────────
     place_results = await _fetch_places(planner_output)
-    route_results = await _fetch_routes(planner_output, place_results)
+    route_results, attraction_prices = await asyncio.gather(
+        _fetch_routes(planner_output, place_results),
+        _fetch_attraction_prices(place_results),
+    )
+
+    print(
+        f"\n[run_itinerary_pipeline] Phase 3 완료"
+        f"\n  place_results    ={len(place_results)}건"
+        f"\n  route_results    ={len(route_results)}건"
+        f"\n  attraction_prices={len(attraction_prices)}건",
+        flush=True,
+    )
 
     # ── Phase 4: 합성기 LLM 1회 ────────────────────────────────────────
     synth_deps = SynthesizerDeps(
@@ -692,24 +980,13 @@ async def run_itinerary_pipeline(
         planner_output=planner_output,
         place_results=place_results,
         route_results=route_results,
-        weather=weather,
-        web_summary=web_summary,
+        weather_by_city=weather_by_city,
+        web_summaries=web_summaries,
         preferences=deps.preferences,
         ai_summary=deps.ai_summary,
         today=deps.today,
         similar_messages=deps.similar_messages,
-    )
-    print(
-        f"\n[run_itinerary_pipeline] SynthesizerDeps 조립 완료"
-        f"\n  destination={itinerary.get('destination')}, start={itinerary.get('start_date')}, end={itinerary.get('end_date')}"
-        f"\n  ai_summary    : {deps.ai_summary}"
-        f"\n  preferences   : {deps.preferences}"
-        f"\n  planner days  : {len(planner_output.days)}일"
-        f"\n  flights       : {len(planner_output.selected_flights)}편"
-        f"\n  hotels        : {len(planner_output.selected_hotels)}개"
-        f"\n  place_results : {len(place_results)}건"
-        f"\n  route_results : {len(route_results)}건",
-        flush=True,
+        attraction_prices=attraction_prices,
     )
     synth_context = _build_synthesizer_prompt(synth_deps)
     async with synthesizer_agent.run_stream(
@@ -723,4 +1000,19 @@ async def run_itinerary_pipeline(
             if len(msg) > len(prev_msg):
                 yield msg[len(prev_msg):]
                 prev_msg = msg
-        yield await stream.get_output()
+
+        result = await stream.get_output()
+
+    # ── 예산 초과 확인 — cost 합산 후 초과 시 업데이트 제안 ─────────────
+    if budget and result.day_plans:
+        total_krw = _estimate_total_krw(result.day_plans)
+        if total_krw > budget:
+            budget_msg = (
+                f"\n\n💡 현재 일정 기준 예상 총 비용은 약 {total_krw:,.0f}원이에요 "
+                f"(설정 예산: {int(budget):,.0f}원). "
+                f"여행 예산을 {total_krw:,.0f}원으로 업데이트할까요?"
+            )
+            yield budget_msg
+            result = result.model_copy(update={"message": result.message + budget_msg})
+
+    yield result
