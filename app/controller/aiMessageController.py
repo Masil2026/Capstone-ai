@@ -182,14 +182,18 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
     # [5] chunk 이벤트는 [4]의 스트리밍 중 실시간 전송됨
 
     # [6] day_plans cost.amount_krw 자동 변환
+    # KRW: 항상 null / 비KRW: LLM 값 무시하고 항상 서버에서 재계산
     if orch_result.day_plans:
         for items in orch_result.day_plans.values():
             for item in items:
-                if item.cost and item.cost.currency != "KRW" and item.cost.amount_krw is None:
-                    try:
-                        item.cost.amount_krw = await to_krw(item.cost.amount, item.cost.currency)
-                    except Exception:
-                        pass
+                if item.cost:
+                    if item.cost.currency == "KRW":
+                        item.cost.amount_krw = None
+                    else:
+                        try:
+                            item.cost.amount_krw = await to_krw(item.cost.amount, item.cost.currency)
+                        except Exception:
+                            item.cost.amount_krw = None
 
     # [7] AI 응답 임베딩 생성
     try:
@@ -245,7 +249,9 @@ def _build_done_event(
     change = None
     if orch_result.change:
         c = orch_result.change
+        destinations_data = [d.model_dump() for d in c.destinations] if c.destinations else None
         change = ChangePayload(
+            destinations=destinations_data,
             startDate=c.start_date,
             endDate=c.end_date,
             budget=c.budget,

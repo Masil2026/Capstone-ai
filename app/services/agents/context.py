@@ -154,7 +154,7 @@ def _query_current_itinerary(room_id: str) -> dict | None:
     with SessionLocal() as db:
         row = db.execute(
             text(
-                "SELECT destination, start_date, end_date, total_days, "
+                "SELECT destinations, start_date, end_date, total_days, "
                 "budget, adult_count, child_count, child_ages, day_plans "
                 "FROM itineraries "
                 "WHERE room_id = :room_id "
@@ -166,7 +166,12 @@ def _query_current_itinerary(room_id: str) -> dict | None:
         if row is None:
             return None
 
-        if not row.destination or not row.start_date:
+        destinations = row.destinations
+        if isinstance(destinations, str):
+            destinations = json.loads(destinations)
+        destinations = destinations or []
+
+        if not destinations or not row.start_date:
             return None
 
         day_plans = row.day_plans
@@ -178,7 +183,7 @@ def _query_current_itinerary(room_id: str) -> dict | None:
             child_ages = json.loads(child_ages)
 
         return {
-            "destination": row.destination,
+            "destinations": destinations,
             "start_date": _to_date_str(row.start_date),
             "end_date": _to_date_str(row.end_date),
             "total_days": row.total_days,

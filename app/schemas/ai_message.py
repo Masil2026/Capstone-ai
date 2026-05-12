@@ -35,7 +35,14 @@ class ResponseClassification(BaseModel):
 
 # ── 오케스트레이터 result_type DTO ────────────────────────────────────────────
 
+class DestinationItem(BaseModel):
+    city: str
+    start_date: str     # YYYY-MM-DD
+    end_date: str       # YYYY-MM-DD
+
+
 class ChangeFields(BaseModel):
+    destinations: list[DestinationItem] | None = None
     start_date: str | None = None   # YYYY-MM-DD
     end_date: str | None = None
     budget: float | None = None
@@ -97,6 +104,7 @@ class ItineraryPayload(BaseModel):
 
 
 class ChangePayload(BaseModel):
+    destinations: list[dict] | None = None
     startDate: str | None = None
     endDate: str | None = None
     budget: float | None = None
