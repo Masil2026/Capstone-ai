@@ -215,6 +215,8 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
 
     if deps.current_itinerary:
         it = deps.current_itinerary
+        destinations = it.get("destinations") or []
+        dest_str = " → ".join(d["city"] for d in destinations) if destinations else "미설정"
         child_ages = it.get("child_ages") or []
         child_str = f"{it.get('child_count')}명 (나이: {child_ages})" if it.get("child_count") else "없음"
         budget = it.get("budget")
@@ -223,12 +225,16 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
 
         section_lines = [
             "## 현재 여행 기본 정보 (DB에서 조회된 실제 값 — 반드시 이 데이터를 기준으로 답변할 것)",
-            f"- 여행지: {it.get('destination')}",
+            f"- 여행지: {dest_str}",
             f"- 여행 기간: {it.get('start_date')} ~ {it.get('end_date')} ({it.get('total_days')}일)",
             f"- 예산: {budget_str}",
             f"- 성인: {it.get('adult_count')}명",
             f"- 어린이: {child_str}",
         ]
+        if len(destinations) > 1:
+            section_lines.append("- 도시별 일정:")
+            for d in destinations:
+                section_lines.append(f"  - {d['city']}: {d['start_date']} ~ {d['end_date']}")
         if day_plans:
             section_lines.append("")
             section_lines.append("### 기존 일정 (수정 시 반드시 이 내용을 기준으로 변경할 것)")
@@ -376,8 +382,10 @@ async def find_route(origin: str, dest: str, mode: str = "transit") -> dict:
     이동 시간을 각 항목의 time 필드에 반영하여 현실적인 시간표를 구성한다.
 
     - origin/dest: 영문 장소명 + 도시명. 예) "Senso-ji Temple, Tokyo", "Shinjuku Station, Tokyo"
-    - mode: "transit"(대중교통, 기본값) / "walking"(도보, 1km 이내) / "driving" / "bicycling"
-    - 반환: {status, data: {routes: [{distance, duration, steps}]}}
+    - mode: "transit"(대중교통, 기본값) / "walking"(도보, 1km 이내) / "bicycling" — "driving" 사용 금지 (렌터카 제외)
+    - 반환: {status, data: {routes: [{distance_text, duration_text, fare, steps}]}}
+    - fare: {"currency":"JPY","text":"¥500","value":500.0} 또는 null (transit 일부 노선만 제공)
+    - fare가 있으면 이동 항목 cost에 사용: fare.value(1인) × 인원수. amount_krw 절대 작성 금지.
     - 이동 소요 시간을 일정 time에 반영: 예) 이동 30분이면 앞 일정 종료 후 30분 버퍼 추가
     """
     return await _service.process_task("google_maps", "find_route", {
@@ -420,7 +428,7 @@ async def book_flight(
     LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
 
     - origin/destination: **반드시 영문 도시명**으로 전달할 것.
-      현재 여행 정보의 destination 값에서 영문명을 추출해 사용한다.
+      현재 여행 정보의 destinations 배열에서 해당 도시의 영문명을 추출해 사용한다.
       예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
           "(오사카, Osaka)" → "Osaka"  |  "Osaka"처럼 영문이면 그대로 사용
     - departure_date: YYYY-MM-DD 형식
@@ -446,7 +454,7 @@ async def book_hotel(
     LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
 
     - city_name: **반드시 영문 도시명**으로 전달할 것.
-      현재 여행 정보의 destination 값에서 영문명을 추출해 사용한다.
+      현재 여행 정보의 destinations 배열에서 해당 도시의 영문명을 추출해 사용한다.
       예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
           "(오사카, Osaka)" → "Osaka"  |  "방콕" → "Bangkok"
     - check_in/check_out: YYYY-MM-DD 형식
