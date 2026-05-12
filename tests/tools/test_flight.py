@@ -50,8 +50,8 @@ async def test_flight_search_adults_only():
     service = TravelAgentService({"duffel_flight": adapter})
 
     params = {
-        "origin": "seoul", "destination": "osaka",
-        "departure_date": "2026-06-20",
+        "origin": "seoul", "destination": "london",
+        "departure_date": "2026-12-20",
         "adults": 2
     }
 
