@@ -158,8 +158,11 @@ class FlightAdapter(ApiTools):
 
                 offers = data.get("data", {}).get("offers", [])
                 print(f"[FlightAdapter] search_flights 결과: {len(offers)}개 offers")
+                # Duffel Airways는 테스트용 가상 항공사이므로 제외
+                real_offers = [o for o in offers if o.get("owner", {}).get("name") != "Duffel Airways"]
+                print(f"[FlightAdapter] Duffel Airways 제외 후: {len(real_offers)}개 offers")
                 processed_results = []
-                for offer in offers[:10]: # 항공편 중 상위 10개만 뽑음
+                for offer in real_offers[:10]:
                     segments = offer["slices"][0]["segments"]
                     orig_amount = float(offer["total_amount"])
                     orig_currency = offer["total_currency"]
