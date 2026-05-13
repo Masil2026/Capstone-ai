@@ -17,7 +17,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import AsyncGenerator
 
 _log = logging.getLogger(__name__)
@@ -43,6 +43,18 @@ _service = TravelAgentService({
 })
 
 _DEFAULT_ORIGIN = "Seoul"
+
+
+def _all_dates(destinations: list[dict]) -> list[str]:
+    """start_date ~ end_date 전체 날짜 목록 반환 (YYYY-MM-DD)."""
+    start = datetime.strptime(destinations[0]["start_date"][:10], "%Y-%m-%d").date()
+    end = datetime.strptime(destinations[-1]["end_date"][:10], "%Y-%m-%d").date()
+    dates = []
+    curr = start
+    while curr <= end:
+        dates.append(str(curr))
+        curr += timedelta(days=1)
+    return dates
 
 
 async def _extract_english_cities(cities: list[str]) -> list[str]:
@@ -171,6 +183,7 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
     adults = info.get("adult_count", 1)
     children = info.get("child_count", 0)
     child_ages = info.get("child_ages", [])
+    all_dates = _all_dates(destinations) if destinations else []
 
     budget_str = f"{budget:,.0f}원" if budget else "제한 없음"
     child_str = f"어린이 {children}명 (나이: {child_ages})" if children else "없음"
@@ -209,7 +222,8 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "3. days: 날짜별 city 필드와 ordered_queries 목록",
         "   - city: 해당 날짜의 여행 도시명 (destinations 배열 기준으로 배정, 한국어 원본)",
         "   - ordered_queries: 방문 순서대로 관광지 + 식사 장소 검색어",
-        "   - 기존 일정이 없으면: 전체 날짜에 대해 작성 (start_date ~ end_date 모든 날짜 포함, 하루도 빠짐없이)",
+        "   - 기존 일정이 없으면: 아래 [## 반드시 포함해야 할 전체 날짜 목록]의 날짜를 하나도 빠짐없이 days에 포함할 것.",
+        f"   ⚠️ days 배열 길이는 반드시 {len(all_dates)}개여야 한다. 단 1일도 누락 불가.",
         "   ⚠️ 이동일·경유일·항공 탑승일도 포함하되 ordered_queries=[]로 설정. 날짜 누락 절대 금지.",
         "   - 기존 일정이 있으면: **사용자가 수정 요청한 날짜만** 작성 (나머지 날짜는 포함하지 않는다)",
         "",
@@ -238,6 +252,14 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
     ]
 
     existing_plans = info.get("day_plans")
+    if not existing_plans and all_dates:
+        lines += [
+            "",
+            f"## 반드시 포함해야 할 전체 날짜 목록 (총 {len(all_dates)}일 — 하나도 빠짐없이 days에 추가)",
+        ]
+        for dt in all_dates:
+            lines.append(f"  - {dt}")
+
     if existing_plans:
         lines += ["", "## 기존 일정 (반드시 이 내용을 기준으로, 요청된 날짜만 수정할 것)"]
         for date_key, items in existing_plans.items():
@@ -355,6 +377,7 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
     adults = info.get("adult_count", 1)
     children = info.get("child_count", 0)
     total_people = adults + children
+    all_dates = _all_dates(destinations) if destinations else []
 
     print(
         f"\n[synthesizer_agent] _build_synthesizer_prompt 호출\n"
@@ -410,7 +433,9 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         if destinations else "    예) '1일차는 도착 후 시내 탐방...'",
         "  - 기존 일정(## 기존 일정)이 있으면 수정: 반영한 요청과 변경 결과를 구체적으로 설명한다.",
         "- `day_plans`: 키='YYYY-MM-DD'. 신규 생성이면 모든 날짜, 수정이면 요청된 날짜만 반환 (나머지는 포함하지 않는다).",
-        "  ⚠️ 신규 생성 시: start_date부터 end_date까지 하루도 빠짐없이 모든 날짜가 키에 있어야 한다.",
+        "  ⚠️ 신규 생성 시: 아래 [## 반드시 포함해야 할 전체 날짜 목록]의 날짜를 하나도 빠짐없이 day_plans 키로 추가.",
+        f"  ⚠️ day_plans 키 수는 반드시 {len(all_dates)}개여야 한다. 단 1일도 누락 불가.",
+        "  ⚠️ 각 날짜의 값은 비어 있으면 절대 안 됨 — {} 또는 [] 반환 절대 금지.",
         "  이동일·경유일·항공 탑승일도 포함. 활동이 없으면 이동 항목 1개라도 반드시 추가.",
         "- `ai_summary`: 번호 목록 형식으로 작성한다.",
         "  형식: 각 항목을 '1. 2. 3.' 번호로 나열. 항목당 한 줄로 핵심 사실만 기술.",
@@ -516,6 +541,14 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
     ]
 
     existing_plans = info.get("day_plans")
+    if not existing_plans and all_dates:
+        lines += [
+            "",
+            f"## 반드시 포함해야 할 전체 날짜 목록 (총 {len(all_dates)}일 — day_plans 키로 하나도 빠짐없이 추가)",
+        ]
+        for dt in all_dates:
+            lines.append(f"  - {dt}")
+
     if existing_plans:
         lines += ["", "## 기존 일정 (수정 요청이면 이 일정을 기준으로 변경할 것)"]
         for date_key, items in existing_plans.items():
@@ -991,6 +1024,34 @@ async def run_itinerary_pipeline(
         message_history=history,
     )
     planner_output: PlannerOutput = planner_result.output
+
+    # 초기 일정 생성 시 플래너가 날짜를 누락한 경우 코드 레벨 보정
+    if not itinerary.get("day_plans"):
+        all_dates = _all_dates(destinations)
+        existing_date_set = {day.date for day in planner_output.days}
+        missing_dates = [dt for dt in all_dates if dt not in existing_date_set]
+        if missing_dates:
+            _log.warning("[planner] 누락 날짜 발견, 자동 보완: %s", missing_dates)
+            # 누락된 날짜에 해당하는 도시 배정 (날짜 범위 기준)
+            city_for_date: dict[str, str] = {}
+            for dest in destinations:
+                d_start = datetime.strptime(dest["start_date"][:10], "%Y-%m-%d").date()
+                d_end = datetime.strptime(dest["end_date"][:10], "%Y-%m-%d").date()
+                curr = d_start
+                while curr <= d_end:
+                    city_for_date[str(curr)] = dest["city"]
+                    curr += timedelta(days=1)
+            added = [
+                DaySchedule(date=dt, city=city_for_date.get(dt, destinations[0]["city"]), ordered_queries=[])
+                for dt in missing_dates
+            ]
+            combined = planner_output.days + added
+            combined.sort(key=lambda x: x.date)
+            planner_output = PlannerOutput(
+                days=combined,
+                selected_flights=planner_output.selected_flights,
+                selected_hotels=planner_output.selected_hotels,
+            )
 
     print(
         f"\n[run_itinerary_pipeline] Phase 2 완료"
