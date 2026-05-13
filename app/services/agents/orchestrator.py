@@ -40,7 +40,10 @@ orchestrator_agent = Agent(
     output_type=OrchestratorResult,
     system_prompt=(
         "당신은 여행 계획 전문 AI 어시스턴트입니다.\n"
-        "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다."
+        "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다.\n"
+        "⚠️ message 필드는 사용자에게 직접 노출되는 자연스러운 한국어 안내문이다. "
+        "day_plans, change, reservation, cancel 같은 JSON 필드명·내부 키·기술 용어를 절대 포함하지 않는다. "
+        "시스템 내부 처리 과정(데이터 반환 방식, JSON 구조 등)을 설명하는 문장도 절대 쓰지 않는다."
     ),
 )
 

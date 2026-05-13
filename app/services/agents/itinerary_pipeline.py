@@ -565,6 +565,9 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "",
         "## 필수 출력",
         "- `message`: 아래 기준으로 작성한다.",
+        "  ⚠️ message는 사용자에게 직접 노출되는 자연스러운 한국어 안내문이다.",
+        "     day_plans, change, reservation 같은 JSON 필드명·내부 키·기술 용어를 절대 포함하지 않는다.",
+        "     시스템 내부 처리 과정(데이터 반환 방식, JSON 구조 등)을 설명하는 문장도 절대 쓰지 않는다.",
         "  - 기존 일정(## 기존 일정)이 없으면 신규 생성: 날짜별 주요 코스를 간략히 소개한다.",
         f"    예) '1일차는 {destinations[0]['city'] if destinations else '첫 번째 도시'} 도착 후 시내 탐방, 2일차는..."
         if destinations else "    예) '1일차는 도착 후 시내 탐방...'",
