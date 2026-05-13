@@ -236,6 +236,9 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "- 출발 시간 제한 없음. 새벽(00:00~06:00) / 야간(21:00~23:59) 출발도 정상 선택 가능.",
         "- 장거리 국제선(유럽·미주·오세아니아)은 새벽·야간 출발이 일반적이므로 시간대 무관하게 최적 편 선택.",
         "- 가격·경유 횟수·도착 시간을 종합해 최선의 편 선택. 비용이 낮고 경유 적은 편 우선.",
+        f"- ⚠️ 귀국편(return) 필수 제약: 한국(ICN/GMP) 도착 일자가 반드시 여행 마지막 날({end})이어야 한다.",
+        f"  arriving_at 날짜가 {end}을 초과하는 귀국편은 절대 선택 금지.",
+        f"  귀국편 데이터에는 {end} 출발편과 {end} 하루 전 출발편이 모두 포함되어 있다. {end} 당일 도착 가능한 편을 우선 선택.",
         "- ⚠️ '실시간 항공편 없음' 표시된 구간은 selected_flights에 절대 포함하지 말 것. 항공편을 임의로 만들거나 추측하지 말 것.",
         "",
         "## ordered_queries 작성 규칙",
@@ -414,8 +417,11 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "       '2026-12-21': [{\"plan_name\":\"XX항공 기내 (비행 중) → STN 도착\",\"time\":\"00:00~16:45\",\"cost\":null}, ...]",
         "- 도시 이동일 첫 항목: 도시 간 이동 항공 (해당 구간 connect 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  예) {\"plan_name\": \"파리 샤를드골(CDG) → 로마 피우미치노(FCO) 항공 이동 (항공사명)\", \"time\": \"HH:MM ~ HH:MM\", \"cost\": {\"amount\": price_original, \"currency\": currency}}",
-        "- 마지막날 마지막 항목: 한국 귀국 항공 이동 (return 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
+        f"- 마지막날 마지막 항목: 한국 귀국 항공 이동 (return 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  예) {\"plan_name\": \"로마 피우미치노(FCO) → 인천국제공항(ICN) 귀국 항공 (항공사명)\", \"time\": \"HH:MM ~ HH:MM\", \"cost\": {\"amount\": price_original, \"currency\": currency}}",
+        f"  ⚠️ 귀국편 도착 날짜는 반드시 여행 마지막 날({destinations[-1]['end_date'][:10]})이어야 한다.",
+        f"  한국 도착이 {destinations[-1]['end_date'][:10]} 이후로 넘어가는 일정은 절대 금지.",
+        f"  day_plans에 {destinations[-1]['end_date'][:10]} 이후 날짜 키가 생기면 안 된다.",
         "- 각 항공 이동 항목 직전: 공항 이동 항목 삽입 (출발 2~3시간 전 기준, 새벽 출발이면 심야 이동도 그대로 기재)",
         "  예) plan_name='숙소 → 인천국제공항 이동 (공항버스/택시)', time='01:30 ~ 03:00'",
         "",
@@ -768,21 +774,60 @@ async def _fetch_flight_legs(
         }))
         leg_info.append({"leg_index": i, "direction": "connect", "from": cities_en[i - 1], "to": cities_en[i]})
 
-    # Return
-    tasks.append(_service.process_task("duffel_flight", "search_flights", {
+    # Return — end_date와 end_date-1 양쪽 검색 후 합산 (장거리 노선 대응)
+    end_dt = datetime.strptime(destinations[-1]["end_date"][:10], "%Y-%m-%d").date()
+    return_common = {
         "origin": cities_en[-1],
         "destination": _DEFAULT_ORIGIN,
-        "departure_date": destinations[-1]["end_date"][:10],
         "adults": adults, "children": children, "child_ages": child_ages,
+    }
+    tasks.append(_service.process_task("duffel_flight", "search_flights", {
+        **return_common, "departure_date": str(end_dt),
     }))
-    leg_info.append({"leg_index": len(destinations), "direction": "return", "from": cities_en[-1], "to": _DEFAULT_ORIGIN})
+    tasks.append(_service.process_task("duffel_flight", "search_flights", {
+        **return_common, "departure_date": str(end_dt - timedelta(days=1)),
+    }))
+    return_leg_info = {
+        "leg_index": len(destinations), "direction": "return",
+        "from": cities_en[-1], "to": _DEFAULT_ORIGIN,
+    }
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    return [
+    # 귀국편 두 날짜 결과 병합
+    non_return = results[:-2]
+    r_end, r_prev = results[-2], results[-1]
+    data_end = r_end.get("data", []) if not isinstance(r_end, Exception) and r_end.get("status") == "success" else []
+    data_prev = r_prev.get("data", []) if not isinstance(r_prev, Exception) and r_prev.get("status") == "success" else []
+    merged_data = data_end + data_prev
+
+    # end_date 이내 도착편만 남김 (arriving_at[:10] <= end_date)
+    end_date_str = str(end_dt)
+    valid_data = [f for f in merged_data if f.get("arriving_at", "")[:10] <= end_date_str]
+    if valid_data:
+        if len(valid_data) < len(merged_data):
+            _log.info(
+                "[return flight] end_date(%s) 초과 도착편 제외: %d → %d개",
+                end_date_str, len(merged_data), len(valid_data),
+            )
+        merged_data = valid_data
+    else:
+        _log.warning("[return flight] end_date(%s) 이내 도착편 없음 — 전체 결과 제공", end_date_str)
+
+    merged_return: dict = {
+        "status": "success" if merged_data else "error",
+        "data": merged_data,
+        "count": len(merged_data),
+    }
+    if not merged_data:
+        merged_return["message"] = "귀국편 검색 결과 없음"
+
+    legs = [
         {**info, "data": (r if not isinstance(r, Exception) else {"status": "error", "message": str(r)})}
-        for info, r in zip(leg_info, results)
+        for info, r in zip(leg_info, non_return)
     ]
+    legs.append({**return_leg_info, "data": merged_return})
+    return legs
 
 
 async def _fetch_hotels(
