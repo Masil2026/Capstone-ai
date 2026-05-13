@@ -17,7 +17,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import AsyncGenerator
 
 _log = logging.getLogger(__name__)
@@ -55,6 +55,123 @@ def _all_dates(destinations: list[dict]) -> list[str]:
         dates.append(str(curr))
         curr += timedelta(days=1)
     return dates
+
+
+_TRANSPORT_KEYWORDS = frozenset({"항공 이동", "기내 (비행 중)"})
+
+
+def _is_transport_day(items: list) -> bool:
+    """day_plans 하루 항목에 교통 이동(항공·기내) 항목이 있으면 True."""
+    for item in items:
+        name = item.get("plan_name", "") if isinstance(item, dict) else ""
+        if any(kw in name for kw in _TRANSPORT_KEYWORDS):
+            return True
+    return False
+
+
+def _get_replan_dates_for_date_change(
+    itinerary: dict,
+) -> tuple[dict, list[str]]:
+    """
+    여행 기간(start_date/end_date) 변경을 감지하고,
+    기존 day_plans에서 교통 이동일(m)을 제거한 조정된 plans와
+    새로 계획해야 할 날짜 목록(m+n일)을 반환한다.
+
+    변경 없으면 (원본 day_plans, []) 반환.
+    """
+    day_plans = itinerary.get("day_plans") or {}
+    destinations = itinerary.get("destinations") or []
+    if not day_plans or not destinations:
+        return day_plans, []
+
+    new_start = destinations[0]["start_date"][:10]
+    new_end = destinations[-1]["end_date"][:10]
+    existing_dates = sorted(day_plans.keys())
+    if not existing_dates:
+        return day_plans, []
+
+    old_start = existing_dates[0]
+    old_end = existing_dates[-1]
+    if new_start == old_start and new_end == old_end:
+        return day_plans, []
+
+    adjusted = dict(day_plans)
+    replan_set: set[str] = set()
+
+    # ── 마지막 날짜 변경 ─────────────────────────────────────────────────
+    if new_end != old_end:
+        new_end_dt = date.fromisoformat(new_end)
+        old_end_dt = date.fromisoformat(old_end)
+
+        # 범위 밖 날짜 제거 (단축)
+        for d in [d for d in existing_dates if d > new_end]:
+            adjusted.pop(d, None)
+
+        # 남은 일정의 끝에서 교통 이동일(m) 제거 → 재계획 대상
+        for d in reversed(sorted(adjusted.keys())):
+            if _is_transport_day(adjusted.get(d, [])):
+                adjusted.pop(d)
+                replan_set.add(d)
+            else:
+                break
+
+        # 신규 날짜 추가 (연장)
+        curr = old_end_dt + timedelta(days=1)
+        while curr <= new_end_dt:
+            replan_set.add(str(curr))
+            curr += timedelta(days=1)
+
+        # 단축 시: 새 마지막 날 + 그 전날(야간 비행 대비)을 재계획
+        if new_end_dt < old_end_dt:
+            replan_set.add(new_end)
+            prev = new_end_dt - timedelta(days=1)
+            if str(prev) >= new_start:
+                replan_set.add(str(prev))
+
+    # ── 시작 날짜 변경 ────────────────────────────────────────────────────
+    if new_start != old_start:
+        new_start_dt = date.fromisoformat(new_start)
+        old_start_dt = date.fromisoformat(old_start)
+
+        # 범위 밖 날짜 제거 (단축)
+        for d in [d for d in existing_dates if d < new_start]:
+            adjusted.pop(d, None)
+
+        # 남은 일정의 앞에서 교통 이동일(m) 제거 → 재계획 대상
+        for d in sorted(adjusted.keys()):
+            if _is_transport_day(adjusted.get(d, [])):
+                adjusted.pop(d)
+                replan_set.add(d)
+            else:
+                break
+
+        # 신규 날짜 추가 (연장)
+        curr = new_start_dt
+        while curr < old_start_dt:
+            replan_set.add(str(curr))
+            curr += timedelta(days=1)
+
+        # 단축 시: 새 첫날 + 그 다음날(야간 도착 대비)을 재계획
+        if new_start_dt > old_start_dt:
+            replan_set.add(new_start)
+            nxt = new_start_dt + timedelta(days=1)
+            if str(nxt) <= new_end:
+                replan_set.add(str(nxt))
+
+    # new_start ~ new_end 범위 내 날짜만 유효
+    replan_dates = sorted(d for d in replan_set if new_start <= d <= new_end)
+
+    if not replan_dates:
+        return day_plans, []
+
+    print(
+        f"\n[_get_replan_dates_for_date_change] 날짜 변경 감지"
+        f"\n  old: {old_start} ~ {old_end}"
+        f"\n  new: {new_start} ~ {new_end}"
+        f"\n  재계획 날짜({len(replan_dates)}일): {replan_dates}",
+        flush=True,
+    )
+    return adjusted, replan_dates
 
 
 async def _extract_english_cities(cities: list[str]) -> list[str]:
@@ -162,6 +279,7 @@ class PlannerDeps:
     ai_summary: str | None
     today: str
     similar_messages: list[dict]
+    replan_dates: list[str]      # 날짜 변경으로 재계획이 필요한 날짜 목록 (없으면 [])
 
 
 planner_agent = Agent(
@@ -225,7 +343,8 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "   - 기존 일정이 없으면: 아래 [## 반드시 포함해야 할 전체 날짜 목록]의 날짜를 하나도 빠짐없이 days에 포함할 것.",
         f"   ⚠️ days 배열 길이는 반드시 {len(all_dates)}개여야 한다. 단 1일도 누락 불가.",
         "   ⚠️ 이동일·경유일·항공 탑승일도 포함하되 ordered_queries=[]로 설정. 날짜 누락 절대 금지.",
-        "   - 기존 일정이 있으면: **사용자가 수정 요청한 날짜만** 작성 (나머지 날짜는 포함하지 않는다)",
+        "   - 기존 일정 + 날짜 변경 없음: **사용자가 수정 요청한 날짜만** 작성 (나머지 날짜는 포함하지 않는다)",
+        "   - 기존 일정 + 날짜 변경 있음: [## 날짜 변경 재계획 대상] 섹션의 날짜를 반드시 작성 (+ 사용자가 추가로 요청한 날짜)",
         "",
         "## 여행 일정 개요 (도시별 체류 기간)",
     ]
@@ -263,8 +382,19 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         for dt in all_dates:
             lines.append(f"  - {dt}")
 
+    if d.replan_dates:
+        lines += [
+            "",
+            f"## 날짜 변경 재계획 대상 (총 {len(d.replan_dates)}일 — 반드시 새로 계획)",
+            "여행 기간이 변경되어 교통 이동일 포함 아래 날짜들을 새로 계획해야 한다.",
+            "⚠️ 아래 날짜는 기존 일정에 있던 내용을 무시하고 반드시 새로 작성.",
+            "⚠️ 그 외 날짜는 절대 포함하지 않는다.",
+        ]
+        for dt in d.replan_dates:
+            lines.append(f"  - {dt}")
+
     if existing_plans:
-        lines += ["", "## 기존 일정 (반드시 이 내용을 기준으로, 요청된 날짜만 수정할 것)"]
+        lines += ["", "## 기존 일정 (변경 없는 날짜의 참고용 — 재계획 대상 날짜는 무시할 것)"]
         for date_key, items in existing_plans.items():
             lines.append(f"### {date_key}")
             for item in items:
@@ -361,6 +491,7 @@ class SynthesizerDeps:
     today: str
     similar_messages: list[dict]
     attraction_prices: dict[str, str]   # place_name → Tavily 입장료 검색 결과 (없으면 {})
+    replan_dates: list[str]             # 날짜 변경으로 재계획이 필요한 날짜 목록 (없으면 [])
 
 
 synthesizer_agent = Agent(
@@ -438,9 +569,11 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         f"    예) '1일차는 {destinations[0]['city'] if destinations else '첫 번째 도시'} 도착 후 시내 탐방, 2일차는..."
         if destinations else "    예) '1일차는 도착 후 시내 탐방...'",
         "  - 기존 일정(## 기존 일정)이 있으면 수정: 반영한 요청과 변경 결과를 구체적으로 설명한다.",
-        "- `day_plans`: 키='YYYY-MM-DD'. 신규 생성이면 모든 날짜, 수정이면 요청된 날짜만 반환 (나머지는 포함하지 않는다).",
-        "  ⚠️ 신규 생성 시: 아래 [## 반드시 포함해야 할 전체 날짜 목록]의 날짜를 하나도 빠짐없이 day_plans 키로 추가.",
-        f"  ⚠️ day_plans 키 수는 반드시 {len(all_dates)}개여야 한다. 단 1일도 누락 불가.",
+        "- `day_plans`: 키='YYYY-MM-DD'. 아래 규칙에 따라 반환할 날짜가 결정된다:",
+        "  ① 신규 생성(기존 일정 없음): 아래 [## 반드시 포함해야 할 전체 날짜 목록]의 모든 날짜.",
+        f"    ⚠️ day_plans 키 수는 반드시 {len(all_dates)}개여야 한다. 단 1일도 누락 불가.",
+        "  ② 날짜 변경 수정: [## 날짜 변경 재계획 대상] 섹션의 날짜만 반환. 나머지는 포함하지 않는다.",
+        "  ③ 일반 수정(날짜 변경 없음): 사용자가 요청한 날짜만 반환. 나머지는 포함하지 않는다.",
         "  ⚠️ 각 날짜의 값은 비어 있으면 절대 안 됨 — {} 또는 [] 반환 절대 금지.",
         "  이동일·경유일·항공 탑승일도 포함. 활동이 없으면 이동 항목 1개라도 반드시 추가.",
         "- `ai_summary`: 번호 목록 형식으로 작성한다.",
@@ -555,8 +688,19 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         for dt in all_dates:
             lines.append(f"  - {dt}")
 
+    if d.replan_dates:
+        lines += [
+            "",
+            f"## 날짜 변경 재계획 대상 (총 {len(d.replan_dates)}일 — 반드시 새로 계획)",
+            "여행 기간이 변경되어 교통 이동일 포함 아래 날짜들을 새로 계획해야 한다.",
+            "⚠️ 아래 날짜는 기존 일정에 있던 내용을 무시하고 반드시 새로 작성.",
+            "⚠️ 그 외 날짜는 절대 포함하지 않는다.",
+        ]
+        for dt in d.replan_dates:
+            lines.append(f"  - {dt}")
+
     if existing_plans:
-        lines += ["", "## 기존 일정 (수정 요청이면 이 일정을 기준으로 변경할 것)"]
+        lines += ["", "## 기존 일정 (변경 없는 날짜의 참고용 — 재계획 대상 날짜는 무시할 것)"]
         for date_key, items in existing_plans.items():
             lines.append(f"### {date_key}")
             for item in items:
@@ -1019,6 +1163,13 @@ async def run_itinerary_pipeline(
     child_ages = itinerary.get("child_ages") or []
     budget = itinerary.get("budget")
 
+    # 날짜 변경 감지: 기존 day_plans가 있으면 교통 이동일 제거 + 재계획 날짜 산출
+    replan_dates: list[str] = []
+    if itinerary.get("day_plans"):
+        adjusted_day_plans, replan_dates = _get_replan_dates_for_date_change(itinerary)
+        if replan_dates:
+            itinerary = {**itinerary, "day_plans": adjusted_day_plans}
+
     # 도시명 영문 변환 (전체 목적지 일괄 처리 — 단일 LLM 호출)
     cities_kr = [d["city"] for d in destinations]
     cities_en = await _extract_english_cities(cities_kr)
@@ -1061,6 +1212,7 @@ async def run_itinerary_pipeline(
         ai_summary=deps.ai_summary,
         today=deps.today,
         similar_messages=deps.similar_messages,
+        replan_dates=replan_dates,
     )
     planner_context = _build_planner_prompt(planner_deps)
     planner_result = await planner_agent.run(
@@ -1134,6 +1286,7 @@ async def run_itinerary_pipeline(
         today=deps.today,
         similar_messages=deps.similar_messages,
         attraction_prices=attraction_prices,
+        replan_dates=replan_dates,
     )
     synth_context = _build_synthesizer_prompt(synth_deps)
     async with synthesizer_agent.run_stream(
