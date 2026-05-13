@@ -303,7 +303,15 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         lines += [f"### {city}", summary]
 
     if d.preferences:
-        lines += ["", "## 사용자 취향", json.dumps(d.preferences, ensure_ascii=False, indent=2)]
+        lines += [
+            "",
+            "## 사용자 취향",
+            json.dumps(d.preferences, ensure_ascii=False, indent=2),
+            "⚠️ 취향 반영 원칙: 취향은 일정에 적절히 반영하되 과도하게 편중되지 않게 한다.",
+            "- food: 전체 식사(아침·점심·저녁) 중 1~2회만 포함. 나머지는 현지 다양한 음식으로 구성.",
+            "- activities: 선호 활동을 일부 포함하되 관광지·문화 체험 등 다양한 일정과 균형을 맞춤.",
+            "- 그 외 취향도 '힌트'로 참고하며, 모든 항목에 적용하지 않는다.",
+        ]
     if d.ai_summary:
         lines += ["", "## 이전 대화 요약", d.ai_summary]
     if d.similar_messages:
@@ -575,7 +583,15 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         lines += ["", f"## 예산 제약: 총 {budget:,.0f}원 (성인 {adults}명 기준)"]
 
     if d.preferences:
-        lines += ["", "## 사용자 취향", json.dumps(d.preferences, ensure_ascii=False, indent=2)]
+        lines += [
+            "",
+            "## 사용자 취향",
+            json.dumps(d.preferences, ensure_ascii=False, indent=2),
+            "⚠️ 취향 반영 원칙: 취향은 일정에 적절히 반영하되 과도하게 편중되지 않게 한다.",
+            "- food: 전체 식사(아침·점심·저녁) 중 1~2회만 포함. 나머지는 현지 다양한 음식으로 구성.",
+            "- activities: 선호 활동을 일부 포함하되 관광지·문화 체험 등 다양한 일정과 균형을 맞춤.",
+            "- 그 외 취향도 '힌트'로 참고하며, 모든 항목에 적용하지 않는다.",
+        ]
     if d.ai_summary:
         lines += ["", "## 이전 대화 요약", d.ai_summary]
     if d.similar_messages:
@@ -616,7 +632,7 @@ async def _fetch_web_summary(city: str, preferences: dict | None) -> str:
     combined = "\n\n".join(snippets[:10])
     pref_hint = ""
     if preferences:
-        pref_hint = f"\n\n사용자 취향: {json.dumps(preferences, ensure_ascii=False)}\n위 취향에 맞는 정보를 우선적으로 포함해줘."
+        pref_hint = f"\n\n사용자 취향: {json.dumps(preferences, ensure_ascii=False)}\n위 취향을 참고하여 관련 정보를 일부 포함하되, 현지 대표 음식·명소 등 다양한 여행 정보의 균형을 유지해줘."
     result = await preprocessor_agent.run(
         f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.{pref_hint}\n\n{combined}"
     )
