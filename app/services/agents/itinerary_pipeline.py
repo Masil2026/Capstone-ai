@@ -499,6 +499,9 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "  distance_text 없으면 현지 물가 기준 추정. amount_krw 절대 작성 금지.",
         "- 입장료: Tavily 검색 결과가 있으면 그 값 우선 사용. 없으면 price_level(0=무료·1=저렴·2=보통·3=비쌈·4=매우 비쌈) 참고해 추정.",
         "  price_level=0이면 cost=null. 성인·아이 요금 구분 적용. amount_krw 절대 작성 금지.",
+        "  [부분 유료 규칙] Tavily 결과에 무료 입장 + 유료 구역 혼재(예: 공원 입장 무료·특별관 유료, 외부 무료·내부 유료)가 언급된 경우:",
+        f"    cost는 유료 구역 기준 금액(성인 {adults}명 + 어린이 {children}명 합산)으로 작성한다.",
+        "    note에 '입장 자체는 무료이나 [유료 구역/시설명] 등 일부는 별도 요금 발생' 형식으로 설명을 추가한다.",
         "",
         "  ⚠️ 통화별 단가 규모 — 반드시 이 범위를 지킬 것:",
         "     EUR: 식사 1인당 15~50 EUR / 지하철 1인당 2~5 EUR / 입장료 1인당 10~30 EUR",
@@ -564,9 +567,14 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
                 )
 
     if d.attraction_prices:
-        lines += ["", "## 관광지 입장료 (Tavily 검색 결과 — 텍스트 내 금액 활용)"]
+        lines += [
+            "",
+            "## 관광지 입장료 (Tavily 검색 결과)",
+            f"⚠️ cost 산출 시 반드시 성인 {adults}명 + 어린이 {children}명 인원 합산 금액으로 작성한다.",
+            "⚠️ 아래 정보에 '부분 유료'·'일부 무료'·'free admission'·'paid sections' 등이 있으면 아래 [부분 유료 규칙]을 적용한다.",
+        ]
         for name, content in d.attraction_prices.items():
-            lines.append(f"- {name}: {content[:300]}")
+            lines.append(f"- {name}: {content}")
 
     lines += ["", "## 동선 결과 (find_route)"]
     for key, result in d.route_results.items():
@@ -809,7 +817,7 @@ _ATTRACTION_TYPES = frozenset({
 
 
 async def _fetch_attraction_prices(place_results: dict[str, dict]) -> dict[str, str]:
-    """attraction 타입 + price_level > 0 장소의 입장료를 Tavily로 검색."""
+    """attraction 타입 장소의 입장료·부분 유료 여부를 Tavily로 검색."""
     queries: dict[str, str] = {}
     for result in place_results.values():
         if result.get("status") != "success":
@@ -820,12 +828,9 @@ async def _fetch_attraction_prices(place_results: dict[str, dict]) -> dict[str, 
         p = places[0]
         if not (_ATTRACTION_TYPES & set(p.get("types", []))):
             continue
-        price_level = p.get("price_level")
-        if price_level is None or price_level == 0:
-            continue
         name = p.get("name", "")
         if name and name not in queries:
-            queries[name] = f"{name} admission fee entrance ticket price 2026"
+            queries[name] = f"{name} admission fee entrance ticket price free partial paid sections 2026"
 
     if not queries:
         return {}
@@ -844,7 +849,8 @@ async def _fetch_attraction_prices(place_results: dict[str, dict]) -> dict[str, 
             continue
         items = result.get("data", [])
         if items:
-            attraction_prices[name] = items[0].get("content", "")[:400]
+            combined = " | ".join(item.get("content", "")[:200] for item in items[:3])
+            attraction_prices[name] = combined[:600]
 
     return attraction_prices
 
