@@ -57,7 +57,7 @@ class CancelFields(BaseModel):
 
 
 class ReservationFields(BaseModel):
-    reservation_type: str           # "flight" | "hotel"
+    reservation_type: str           # "flight" | "accommodation"
     detail: dict[str, Any]
     booking_url: str | None = None
     external_ref_id: str | None = None

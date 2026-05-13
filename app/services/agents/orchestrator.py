@@ -105,7 +105,7 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 ## 이번 요청: 예약 (reservation)
 
 **[응답 형식 — 반드시 준수]**
-- `reservation.reservation_type`: "flight" 또는 "hotel"
+- `reservation.reservation_type`: "flight" 또는 "accommodation"
 - `reservation.detail`: **반드시 JSON 객체(dict). 문자열 금지.**
   숙소: {"name":"숙소명", "check_in":"YYYY-MM-DD", "check_out":"YYYY-MM-DD", "rooms":1, "guests":인원수}
   항공: {"airline":"항공사명", "departure":"출발IATA", "arrival":"도착IATA", "departing_at":"ISO8601", "arriving_at":"ISO8601", "stops":0}
