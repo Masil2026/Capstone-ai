@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 
 from fastapi import APIRouter, Depends, Query
@@ -26,6 +27,72 @@ from app.services.agents.memory import save_memory
 from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agent, build_context_prompt
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# cancel 선처리 — 오케스트레이터 호출 전 가로채기
+# ---------------------------------------------------------------------------
+
+_NUMBER_RE = re.compile(r'(?:^|\s)\d+\s*번|첫\s*번째|두\s*번째|세\s*번째')
+_IATA_RE = re.compile(r'\b[A-Z]{3}\b')
+
+
+def _build_cancel_list_message(reservations: list[dict]) -> str:
+    """취소 후보 목록 메시지 생성 (구조화된 reservations 데이터 기반)."""
+    lines = ["현재 예약 내역입니다:\n"]
+    for i, r in enumerate(reservations, 1):
+        detail = r.get("detail") or {}
+        rtype_str = "항공" if r.get("type") == "flight" else "숙소"
+        name = detail.get("name") or detail.get("airline") or "알 수 없음"
+        ref = r.get("external_ref_id") or "없음"
+        price_str = f"{int(r['total_price']):,} {r['currency']}" if r.get("total_price") else "가격정보없음"
+        if r.get("type") == "flight":
+            dep = detail.get("departure", "")
+            arr = detail.get("arrival", "")
+            dep_at = (detail.get("departing_at") or "")[:10]
+            lines.append(f"{i}. [{rtype_str}] {name} {dep}→{arr} ({dep_at}) | 예약번호: {ref} | {price_str}")
+        else:
+            check_in = detail.get("check_in", "")
+            check_out = detail.get("check_out", "")
+            lines.append(f"{i}. [{rtype_str}] {name} ({check_in}~{check_out}) | 예약번호: {ref} | {price_str}")
+    lines.append("\n어떤 항목을 취소해드릴까요? 시스템 특성상 한 번에 하나씩만 처리할 수 있어요 😊")
+    return "\n".join(lines)
+
+
+def _user_targets_cancel_item(user_msg: str, reservations: list[dict]) -> bool:
+    """사용자 메시지가 특정 예약을 지목하는지 확인."""
+    lower = user_msg.lower()
+    # "N번", "첫 번째" 등 번호 선택
+    if _NUMBER_RE.search(lower):
+        return True
+    # IATA 코드 (예: "ICN→NRT 취소해줘")
+    if _IATA_RE.search(user_msg):
+        return True
+    # 예약명·항공사명·예약번호 매칭
+    for r in reservations:
+        detail = r.get("detail") or {}
+        identifiers = [
+            detail.get("name") or "",
+            detail.get("airline") or "",
+            r.get("external_ref_id") or "",
+        ]
+        for ident in identifiers:
+            if ident and len(ident) >= 3 and ident.lower() in lower:
+                return True
+    return False
+
+
+def _get_cancel_intercept_message(user_message: str, reservations: list[dict]) -> str | None:
+    """
+    cancel 요청을 선처리.
+    - 예약 없음 → 안내 메시지 반환
+    - 막연한 취소 요청 → 목록 반환
+    - 특정 항목 지목 → None (오케스트레이터에 위임)
+    """
+    if not reservations:
+        return "취소할 수 있는 예약 내역이 없어요."
+    if _user_targets_cancel_item(user_message, reservations):
+        return None
+    return _build_cancel_list_message(reservations)
 
 
 def _sse(event: str, payload: dict) -> str:
@@ -130,6 +197,33 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         f"\n  current_itinerary: {({k: v for k, v in deps.current_itinerary.items() if k != 'day_plans'} if deps.current_itinerary else None)}",
         flush=True,
     )
+
+    # [3.5] cancel 막연한 요청 선처리 — 오케스트레이터 호출 전 가로채기
+    if request_type == "cancel":
+        intercept_msg = _get_cancel_intercept_message(user_message, ctx.get("reservations", []))
+        if intercept_msg is not None:
+            print(f"[_stream] cancel 선처리 인터셉트: {intercept_msg[:60]!r}", flush=True)
+            yield _sse("chunk", {"content": intercept_msg})
+            try:
+                assistant_embedding = await get_user_embedding(intercept_msg)
+            except Exception:
+                assistant_embedding = None
+            done = _build_done_event(
+                request_type="chat",
+                user_message=user_message,
+                user_embedding=ctx["user_embedding"],
+                full_response=intercept_msg,
+                assistant_embedding=assistant_embedding,
+                orch_result=OrchestratorResult(message=intercept_msg),
+                merged_summary=ctx["ai_summary"],
+                merged_prefs=ctx["preferences"],
+            )
+            if hide_embedding:
+                done.userMessage.embedding = None
+                done.assistantMessage.embedding = None
+            yield _sse("done", _exclude_none(done.model_dump(), keep_null_keys=frozenset({"amount_krw"})))
+            return
+
     # [4] 에이전트 실행 — itinerary는 파이프라인, 그 외는 오케스트레이터 실시간 스트리밍
     print(f"\n[_stream] [4] 에이전트 실행 시작. request_type={request_type}", flush=True)
     try:
