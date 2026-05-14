@@ -40,7 +40,10 @@ orchestrator_agent = Agent(
     output_type=OrchestratorResult,
     system_prompt=(
         "당신은 여행 계획 전문 AI 어시스턴트입니다.\n"
-        "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다."
+        "사용자 요청에 따라 적절한 도구를 활용하고, 구조화된 JSON(OrchestratorResult 형식)으로 응답합니다.\n"
+        "⚠️ message 필드는 사용자에게 직접 노출되는 자연스러운 한국어 안내문이다. "
+        "day_plans, change, reservation, cancel 같은 JSON 필드명·내부 키·기술 용어를 절대 포함하지 않는다. "
+        "시스템 내부 처리 과정(데이터 반환 방식, JSON 구조 등)을 설명하는 문장도 절대 쓰지 않는다."
     ),
 )
 
@@ -62,13 +65,18 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
     예) "1일차는 아사쿠사 → 센소지 → 나카미세 거리 코스로, 저녁에는 원하신 참치회 식당을 배치했습니다. 2일차는 신주쿠 → 하라주쿠 쇼핑 코스로 구성했습니다."
   - **수정**: 반영한 요청과 변경 결과를 구체적으로 설명한다.
     예) "해산물 요청을 반영해 1일차 저녁을 해산물 식당으로 변경했습니다. 3일차에는 시장 방문 코스를 새로 추가했습니다."
+  - **정보 부족**: 누락된 정보를 구체적으로 명시하며 질문한다.
+    예) "여행지가 등록되어 있지 않아요. 어디로 여행을 가실 예정인가요?"
 - `ai_summary`: 번호 목록 형식. 아래 [메모리 업데이트] 참고.
 
 처리:
 1. current_itinerary(여행 기본 정보)가 있으면 반드시 참고한다.
-2. current_itinerary가 없거나 destination·start_date가 비어있으면 일정을 생성하지 말고,
-   사용자에게 여행지·날짜·인원·예산을 먼저 물어봐라. (day_plans는 null로 둔다)
-3. 기본 정보가 모두 있으면 get_weather, search_web, search_place, find_route 도구를 활용해 일정을 구성한다.
+2. **일정 생성 전 필수 정보 검증 — 아래 항목 중 하나라도 없으면 일정을 생성하지 말고 되물어본다. (day_plans = null)**
+   - destinations 배열이 비어있거나 없음 → "여행지를 알려주세요."
+   - start_date 또는 end_date 없음 → "여행 날짜를 알려주세요."
+   - adult_count가 0 또는 없음 → "여행 인원을 알려주세요."
+   - destinations 내 각 도시의 start_date/end_date 누락 → "각 도시의 체류 날짜를 알려주세요."
+3. 필수 정보가 모두 있으면 get_weather, search_web, search_place, find_route 도구를 활용해 일정을 구성한다.
 4. 기존 day_plans가 있으면 사용자 요청에 해당하는 날짜 일정만 새로 작성하여 반환한다.""",
 
     "change": """\
@@ -77,20 +85,36 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 **[응답 형식 — 반드시 준수]**
 반환 JSON의 필드를 아래와 같이 채워야 한다:
 - `change`: 변경된 필드만 포함 (변경하지 않은 필드는 null)
-  가능한 필드: start_date, end_date, budget, adult_count, child_count, child_ages
+  가능한 필드: destinations, start_date, end_date, budget, adult_count, child_count, child_ages
 - `message`: 무엇이 어떻게 변경되었는지 구체적으로 안내한다.
   예) "여행 기간을 5월 3일~7일로 변경하고, 예산을 50만원으로 조정했습니다."
+  정보 부족 시: 누락된 정보를 구체적으로 명시하며 질문한다.
+  예) "추가하시는 아이의 나이를 알려주시겠어요?"
 - `ai_summary`: 번호 목록 형식. 아래 [메모리 업데이트] 참고.
 
 처리:
 1. 외부 API 도구는 호출하지 않는다.
-2. 사용자 메시지에서 변경된 필드만 추출하여 change 필드에 작성한다.""",
+2. 사용자 메시지에서 변경된 필드만 추출하여 change 필드에 작성한다.
+3. **변경 전 정보 부족 검증 — 아래 경우 change = null로 두고 message에서 되물어본다.**
+   - child_count를 늘리는데 추가되는 아이 나이 정보가 없음
+     → "추가하시는 아이의 나이를 알려주시겠어요?"
+   - destinations를 변경하는데 각 도시의 체류 날짜가 명확하지 않음
+     → "각 도시의 체류 날짜를 알려주세요. 예) 파리 3박, 로마 4박"
+   - start_date만 있고 end_date(또는 총 여행 기간)를 알 수 없음
+     → "여행 종료일 또는 총 여행 기간을 알려주세요."
+4. child_ages 배열 길이는 최종 child_count와 반드시 일치해야 한다.""",
 
     "reservation": """\
 ## 이번 요청: 예약 (reservation)
 
-**[응답 형식 — 반드시 준수]**
-- `reservation.reservation_type`: "flight" 또는 "hotel"
+⚠️ **한 번의 요청에 하나의 항목만 예약 가능하다.** 항공·숙소 동시 예약, 복수 건 일괄 처리 불가.
+
+---
+
+**[Case A] 사용자가 예약할 항목을 명확히 1개 지정한 경우 → 즉시 예약 처리**
+
+아래 응답 형식을 채운다:
+- `reservation.reservation_type`: "flight" 또는 "accommodation"
 - `reservation.detail`: **반드시 JSON 객체(dict). 문자열 금지.**
   숙소: {"name":"숙소명", "check_in":"YYYY-MM-DD", "check_out":"YYYY-MM-DD", "rooms":1, "guests":인원수}
   항공: {"airline":"항공사명", "departure":"출발IATA", "arrival":"도착IATA", "departing_at":"ISO8601", "arriving_at":"ISO8601", "stops":0}
@@ -104,25 +128,52 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 - `message`: 예약 완료 안내. 숙소명/항공편 + 날짜 + 예약번호 + 금액 + 예약 URL 포함.
   예) "Mystery Hotel Budapest 5월 10일~14일(4박) 예약이 완료되었습니다. 예약번호: HTL-20260510-A3K9PQ / 총 요금: 600.0 EUR (약 876,000원)\n예약 확인: https://booking.tripai.app/stays/HTL-20260510-A3K9PQ"
 
-처리:
-1. 사용자가 요청한 숙소/항공편 정보를 현재 여행 일정 및 대화 맥락에서 파악한다.
-2. 위 모든 필드를 직접 생성하여 reservation 필드에 작성한다.""",
+---
+
+**[Case B] 사용자가 "예약해줘" 등 항목을 특정하지 않은 경우 → 후보 목록 안내 후 선택 유도**
+
+`reservation` 필드는 **null**로 둔다.
+`message`에 아래 내용을 담는다:
+1. 현재 여행 일정(## 현재 여행 기본 정보 > ### 기존 일정)에서 예약 가능한 후보를 번호 목록으로 추출한다.
+   - 항공편: 이동 항목에서 추출 — "항공사명, 출발지 → 도착지, 출발 날짜/시각" 형식으로 표시
+   - 숙소: 체크인 항목에서 추출 — "숙소명, 체크인 ~ 체크아웃" 형식으로 표시
+2. 목록 마지막에 반드시 다음 문장을 추가한다:
+   "어떤 항목을 예약해드릴까요? 시스템 특성상 한 번에 하나씩만 처리할 수 있습니다 😊"
+3. 이미 예약 완료된 항목(## 활성 예약 목록에 있는 항목)은 후보 목록에서 제외하고 "(이미 예약됨)"으로 표시한다.""",
 
     "cancel": """\
 ## 이번 요청: 예약 취소 (cancel)
 
-**[응답 형식 — 반드시 준수]**
+⚠️ **한 번의 요청에 하나의 항목만 취소 가능하다.** 복수 건 일괄 취소 불가.
+
+---
+
+**[Case A] 사용자가 취소할 항목을 명확히 1개 지정한 경우 → 즉시 취소 처리**
+
 - `cancel.reservation_id`: **반드시 ## 활성 예약 목록의 id(UUID) 값 그대로 사용. 직접 생성 금지.**
 - `cancel.cancelled_at`: 현재 시각 ISO 8601 (예: "2026-05-11T14:30:00+09:00")
-- `message`: 취소 결과를 안내한다.
+- `message`: 취소 완료 안내. 숙소명/항공편 + 예약번호 포함.
+  예) "Mystery Hotel Budapest(예약번호: HTL-20260510-A3K9PQ) 예약이 취소 처리되었습니다."
 
-처리:
-1. ## 활성 예약 목록에서 사용자가 취소하려는 예약을 찾는다.
-2. 일치하는 예약이 있으면 → 해당 id(UUID)를 cancel.reservation_id에 그대로 입력하고, 취소 완료 message 작성.
-   예) "Mystery Hotel Budapest(예약번호: HTL-20260510-A3K9PQ) 예약이 취소 처리되었습니다."
-3. 활성 예약 목록이 비어있거나 일치하는 예약이 없으면 → cancel 필드를 null로 두고,
-   message에 취소할 예약을 찾지 못했음을 안내한다.
-   예) "취소할 예약 내역을 찾지 못했습니다. 현재 활성화된 예약이 없거나 요청하신 예약과 일치하는 항목이 없습니다." """,
+---
+
+**[Case B] 사용자가 "취소해줘" 등 항목을 특정하지 않은 경우 → 예약 목록 안내 후 선택 유도**
+
+`cancel` 필드는 **null**로 둔다.
+`message`에 아래 내용을 담는다:
+1. ## 활성 예약 목록의 항목을 번호 목록으로 보여준다.
+   - 형식: "번호. [항공/숙소] 항목명 | 예약번호 | 금액"
+   - 예) "1. [항공] 대한항공 ICN→NRT (2026-05-01) | 예약번호: FLT-20260501-B7XM2R | 320,000원"
+   - 예) "2. [숙소] 롯데호텔 도쿄 (5/1~5/3) | 예약번호: HTL-20260501-A3K9PQ | 450,000원"
+2. 목록 마지막에 반드시 다음 문장을 추가한다:
+   "어떤 항목을 취소해드릴까요? 시스템 특성상 한 번에 하나씩만 처리할 수 있습니다 😊"
+
+---
+
+**[Case C] 활성 예약 목록이 비어있는 경우**
+
+`cancel` 필드는 **null**로 두고, message에 안내한다.
+예) "취소할 수 있는 예약 내역이 없습니다." """,
 
     "chat": """\
 ## 이번 요청: 일반 대화/질문 (chat)
@@ -200,6 +251,8 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
 
     if deps.current_itinerary:
         it = deps.current_itinerary
+        destinations = it.get("destinations") or []
+        dest_str = " → ".join(d["city"] for d in destinations) if destinations else "미설정"
         child_ages = it.get("child_ages") or []
         child_str = f"{it.get('child_count')}명 (나이: {child_ages})" if it.get("child_count") else "없음"
         budget = it.get("budget")
@@ -208,12 +261,16 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
 
         section_lines = [
             "## 현재 여행 기본 정보 (DB에서 조회된 실제 값 — 반드시 이 데이터를 기준으로 답변할 것)",
-            f"- 여행지: {it.get('destination')}",
+            f"- 여행지: {dest_str}",
             f"- 여행 기간: {it.get('start_date')} ~ {it.get('end_date')} ({it.get('total_days')}일)",
             f"- 예산: {budget_str}",
             f"- 성인: {it.get('adult_count')}명",
             f"- 어린이: {child_str}",
         ]
+        if len(destinations) > 1:
+            section_lines.append("- 도시별 일정:")
+            for d in destinations:
+                section_lines.append(f"  - {d['city']}: {d['start_date']} ~ {d['end_date']}")
         if day_plans:
             section_lines.append("")
             section_lines.append("### 기존 일정 (수정 시 반드시 이 내용을 기준으로 변경할 것)")
@@ -361,8 +418,10 @@ async def find_route(origin: str, dest: str, mode: str = "transit") -> dict:
     이동 시간을 각 항목의 time 필드에 반영하여 현실적인 시간표를 구성한다.
 
     - origin/dest: 영문 장소명 + 도시명. 예) "Senso-ji Temple, Tokyo", "Shinjuku Station, Tokyo"
-    - mode: "transit"(대중교통, 기본값) / "walking"(도보, 1km 이내) / "driving" / "bicycling"
-    - 반환: {status, data: {routes: [{distance, duration, steps}]}}
+    - mode: "transit"(대중교통, 기본값) / "walking"(도보, 1km 이내) / "bicycling" — "driving" 사용 금지 (렌터카 제외)
+    - 반환: {status, data: {routes: [{distance_text, duration_text, fare, steps}]}}
+    - fare: {"currency":"JPY","text":"¥500","value":500.0} 또는 null (transit 일부 노선만 제공)
+    - fare가 있으면 이동 항목 cost에 사용: fare.value(1인) × 인원수. amount_krw 절대 작성 금지.
     - 이동 소요 시간을 일정 time에 반영: 예) 이동 30분이면 앞 일정 종료 후 30분 버퍼 추가
     """
     return await _service.process_task("google_maps", "find_route", {
@@ -405,7 +464,7 @@ async def book_flight(
     LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
 
     - origin/destination: **반드시 영문 도시명**으로 전달할 것.
-      현재 여행 정보의 destination 값에서 영문명을 추출해 사용한다.
+      현재 여행 정보의 destinations 배열에서 해당 도시의 영문명을 추출해 사용한다.
       예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
           "(오사카, Osaka)" → "Osaka"  |  "Osaka"처럼 영문이면 그대로 사용
     - departure_date: YYYY-MM-DD 형식
@@ -431,7 +490,7 @@ async def book_hotel(
     LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
 
     - city_name: **반드시 영문 도시명**으로 전달할 것.
-      현재 여행 정보의 destination 값에서 영문명을 추출해 사용한다.
+      현재 여행 정보의 destinations 배열에서 해당 도시의 영문명을 추출해 사용한다.
       예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
           "(오사카, Osaka)" → "Osaka"  |  "방콕" → "Bangkok"
     - check_in/check_out: YYYY-MM-DD 형식

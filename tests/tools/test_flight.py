@@ -2,23 +2,27 @@ import pytest
 from app.services.adapters.flight_api import FlightAdapter
 from app.services.travel_agent_service import TravelAgentService
 
+
 def _print_flight_results(test_name, result):
-    print("\n" + "="*85)
+    print("\n" + "="*105)
     print(f"[{test_name}] - RESULT STATUS: {result['status']}")
-    
+    if result.get("is_duffel_fallback"):
+        print("⚠️  DUFFEL FALLBACK: 실제 항공사 없음 — Duffel Airways(테스트용) 결과 사용 중")
+
     if result["status"] == "success":
         print(f"TOTAL FOUND: {result.get('count', 0)} offers")
-        print("-" * 85)
-        print(f"{'No':<3} | {'Airline':<18} | {'Route':<11} | {'Price':<12} | {'Stops':<7} | {'Departure':<20}")
-        print("-" * 85)
-        
+        print("-" * 105)
+        print(f"{'No':<3} | {'Airline':<18} | {'Route':<11} | {'Price':<30} | {'Stops':<7} | {'Departure':<22} | {'Arrival':<22} | {'Duration'}")
+        print("-" * 105)
+
         for i, flight in enumerate(result.get("data", []), 1):
             stop_text = "Direct" if flight['stops'] == 0 else f"{flight['stops']} Stop"
             route = f"{flight['origin']}->{flight['destination']}"
             price_str = f"{flight['currency']} {flight['price_original']} ({flight.get('price_krw', '?'):,}원)"
-            print(f"{i:<3} | {flight['airline']:<18} | {route:<11} | {price_str:<28} | {stop_text:<7} | {flight['departing_at']}")
-    
-    print("="*85 + "\n")
+            duration = flight.get('duration', '?')
+            print(f"{i:<3} | {flight['airline']:<18} | {route:<11} | {price_str:<30} | {stop_text:<7} | {flight['departing_at']:<22} | {flight['arriving_at']:<22} | {duration}")
+
+    print("="*105 + "\n")
 
 
 @pytest.mark.asyncio
@@ -28,9 +32,9 @@ async def test_flight_search_with_child():
     service = TravelAgentService({"duffel_flight": adapter})
 
     params = {
-        "origin": "seoul", "destination": "tokyo",
-        "departure_date": "2026-05-15",
-        "adults": 1, "children": 1, "child_ages": [5]
+        "origin": "london", "destination": "zurich",
+        "departure_date": "2026-12-24",
+        "adults": 2, "children": 1, "child_ages": [7]
     }
 
     result = await service.process_task("duffel_flight", "search_flights", params)
@@ -50,9 +54,9 @@ async def test_flight_search_adults_only():
     service = TravelAgentService({"duffel_flight": adapter})
 
     params = {
-        "origin": "seoul", "destination": "osaka",
-        "departure_date": "2026-06-20",
-        "adults": 2
+        "origin": "incheon", "destination": "canada",
+        "departure_date": "2026-05-15",
+        "adults": 1
     }
 
     result = await service.process_task("duffel_flight", "search_flights", params)

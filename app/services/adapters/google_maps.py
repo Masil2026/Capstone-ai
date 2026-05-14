@@ -94,6 +94,7 @@ class GoogleMapsAdapter(ApiTools):
                 "end_address": first_leg.get("end_address"),
                 "distance_text": first_leg.get("distance", {}).get("text"),
                 "duration_text": first_leg.get("duration", {}).get("text"),
+                "fare": route.get("fare"),  # {"currency":"JPY","text":"¥500","value":500.0} or None (transit 일부 노선만)
                 "steps": [
                     {
                         "instruction": step.get("html_instructions"),
@@ -104,6 +105,10 @@ class GoogleMapsAdapter(ApiTools):
                     for step in first_leg.get("steps", [])
                 ]
             })
+
+        for r in routes:
+            fare = r.get("fare")
+            print(f"[GoogleMapsAdapter] 교통 요금: {fare.get('text')} ({fare.get('currency')})" if fare else "[GoogleMapsAdapter] 교통 요금: 정보 없음")
 
         return {
             "status": "success",
@@ -165,9 +170,11 @@ class GoogleMapsAdapter(ApiTools):
                 "message": data.get("error_message") or api_status or "UNKNOWN_ERROR"
             }
 
+        _PRICE_LABEL = {0: "무료", 1: "저렴", 2: "보통", 3: "비쌈", 4: "매우 비쌈"}
         places = []
         for place in data.get("results", []):
             location = place.get("geometry", {}).get("location", {})
+            price_level = place.get("price_level")  # 0~4 상대 척도 (지역마다 기준 다름), 없으면 None
             places.append({
                 "name": place.get("name"),
                 "formatted_address": place.get("formatted_address"),
@@ -177,6 +184,8 @@ class GoogleMapsAdapter(ApiTools):
                 "rating": place.get("rating"),
                 "user_ratings_total": place.get("user_ratings_total"),
                 "types": place.get("types", []),
+                "price_level": price_level,
+                "price_level_label": _PRICE_LABEL.get(price_level) if price_level is not None else None,
             })
 
         return {

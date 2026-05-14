@@ -15,12 +15,20 @@ def _print_hotel_results(test_name, result):
         print("-" * 65)
         
         for i, hotel in enumerate(result.get("data", []), 1):
-            name = hotel.get('name', 'N/A')[:23] # 이름이 길면 자름
-            price = hotel.get('price', 'N/A')
+            name = hotel.get('name', 'N/A')[:23]
+            orig = hotel.get('price_original')
+            cur  = hotel.get('currency', '')
+            krw  = hotel.get('price_krw')
+            if orig is not None:
+                price = f"{orig:.0f} {cur}"
+                if krw:
+                    price += f" / ₩{int(krw):,}"
+            else:
+                price = 'N/A'
             star = hotel.get('rating', '-')
-            addr = hotel.get('address', 'N/A')[:40] # 주소도 길면 자름
-            
-            print(f"{i:<3} | {name:<25} | {price:<15} | {star:<5} | {addr}")
+            addr = hotel.get('address', 'N/A')[:40]
+
+            print(f"{i:<3} | {name:<25} | {price:<25} | {star:<5} | {addr}")
     
     else:
         # 에러 메시지가 리스트일 경우를 대비해 상세히 출력
@@ -37,7 +45,7 @@ async def test_hotel_search_with_child():
 
     # 도쿄 지역, 6월 15일~18일 (3박)
     params = {
-        "city_name": "Tokyo",
+        "city_name": "Seoul",
         "check_in": "2026-06-15",
         "check_out": "2026-06-18",
         "rooms": 1,

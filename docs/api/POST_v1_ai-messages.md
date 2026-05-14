@@ -268,6 +268,8 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 
 **SSE Event:** `done`
 
+**날짜·예산·인원 변경 예시**
+
 ```json
 {
   "type": "change",
@@ -282,30 +284,64 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
   "memory": null,
   "change": {
     "startDate": "2026-05-03",
-    "endDate": "2026-05-07",
-    "budget": 500000.00,
-    "adultCount": 2,
-    "childCount": 1,
-    "childAges": [5]
+    "endDate": "2026-05-07"
+  }
+}
+```
+
+**destinations 변경 예시** (destinations 변경 시 startDate·endDate 항상 함께 포함)
+
+```json
+{
+  "type": "change",
+  "userMessage": {
+    "content": "로마 다음에 바르셀로나 추가해줘",
+    "embedding": [0.0231, -0.1234, ...]
+  },
+  "assistantMessage": {
+    "content": "파리→로마→바르셀로나 순서로 여행지를 업데이트했습니다.",
+    "embedding": [0.0871, 0.0023, ...]
+  },
+  "memory": null,
+  "change": {
+    "destinations": [
+      { "city": "Paris",     "start_date": "2025-06-01", "end_date": "2025-06-04" },
+      { "city": "Rome",      "start_date": "2025-06-04", "end_date": "2025-06-07" },
+      { "city": "Barcelona", "start_date": "2025-06-07", "end_date": "2025-06-10" }
+    ],
+    "startDate": "2025-06-01",
+    "endDate": "2025-06-10"
   }
 }
 ```
 
 ### **change 필드**
 
+**기본 원칙: 변경된 필드만 전송합니다. 변경하지 않은 필드는 payload에 포함하지 않습니다 (`null` 미전송).**
+
 | Field | Required | Type | Description |
 | --- | --- | --- | --- |
-| startDate | N | `DATE (YYYY-MM-DD)` | 변경할 여행 시작일 |
-| endDate | N | `DATE (YYYY-MM-DD)` | 변경할 여행 종료일 |
-| budget | N | `Decimal` | 변경할 예산 |
-| adultCount | N | `Int` | 변경할 어른 수 |
-| childCount | N | `Int` | 변경할 아이 수 |
-| childAges | N | `Int[]` | 변경할 아이 나이 배열 |
+| destinations | N | `Object[]` | 여행지 변경 시 포함. 배열 전체를 항상 교체 — 부분 수정 없음. `[{"city":"Paris","start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}, ...]` |
+| startDate | N | `DATE (YYYY-MM-DD)` | 여행 시작일 변경 시 포함. destinations 변경 시 `destinations[0].start_date`와 반드시 일치 |
+| endDate | N | `DATE (YYYY-MM-DD)` | 여행 종료일 변경 시 포함. destinations 변경 시 `destinations[-1].end_date`와 반드시 일치 |
+| budget | N | `Decimal` | 예산 변경 시 포함 |
+| adultCount | N | `Int` | 성인 수 변경 시 포함 |
+| childCount | N | `Int` | 아이 수 변경 시 포함 |
+| childAges | N | `Int[]` | 아이 나이 변경 시 포함 |
 
-> `destination`은 payload에 포함하지 않습니다. 목적지는 수정 불가입니다.
-> 
+**필드별 전송 규칙 요약**
 
-> 변경하지 않는 필드는 payload에 포함하지 않습니다 (`null` 미전송).
+| 사용자 요청 | 전송 필드 |
+|------------|----------|
+| "날짜 5월 3일~7일로 바꿔줘" | `startDate`, `endDate` |
+| "예산 100만원으로 늘려줘" | `budget` |
+| "성인 3명으로 변경해줘" | `adultCount` |
+| "아이 추가, 7살" | `childCount`, `childAges` |
+| "파리 대신 암스테르담으로 바꿔줘" | `destinations`(전체 배열), `startDate`, `endDate` |
+| "날짜 바꾸고 예산도 늘려줘" | `startDate`, `endDate`, `budget` |
+
+> Spring Boot는 수신한 필드만 `itineraries` 테이블에 업데이트합니다. 누락된 필드는 기존 DB 값을 유지합니다.
+> `total_days`는 payload에 없으며, Spring Boot가 `(endDate - startDate + 1)`로 자동 재계산합니다.
 > 
 
 ---
@@ -313,6 +349,8 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 ### **type: "reservation" 일 때**
 
 **SSE Event:** `done`
+
+**항공권 예시**
 
 ```json
 {
@@ -322,34 +360,55 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
     "embedding": [0.0231, -0.1234, ...]
   },
   "assistantMessage": {
-    "content": "대한항공 KE123편을 예약했습니다.",
+    "content": "대한항공편을 예약했습니다.",
     "embedding": [0.0871, 0.0023, ...]
   },
   "memory": null,
   "reservation": {
     "type": "flight",
-    "bookingUrl": "https://booking.example.com/flight/123",
-    "externalRefId": "KE12345678",
+    "bookingUrl": "https://booking.tripai.app/flights/FLT-20260501-B7XM2R",
+    "externalRefId": "FLT-20260501-B7XM2R",
     "detail": {
       "airline": "대한항공",
-      "flight_no": "KE123",
-      "departure": {
-        "airport": "ICN",
-        "datetime": "2026-05-01T09:00:00"
-      },
-      "arrival": {
-        "airport": "NRT",
-        "datetime": "2026-05-01T11:30:00"
-      },
-      "seat_class": "economy",
-      "passengers": [
-        {
-          "name": "홍길동",
-          "passport": "M12345678"
-        }
-      ]
+      "departure": "ICN",
+      "arrival": "NRT",
+      "departing_at": "2026-05-01T09:00:00",
+      "arriving_at": "2026-05-01T11:30:00",
+      "stops": 0
     },
     "totalPrice": 320000.00,
+    "currency": "KRW",
+    "reservedAt": "2026-05-01T09:00:00+09:00"
+  }
+}
+```
+
+**숙소 예시**
+
+```json
+{
+  "type": "reservation",
+  "userMessage": {
+    "content": "숙소 예약해줘",
+    "embedding": [0.0231, -0.1234, ...]
+  },
+  "assistantMessage": {
+    "content": "롯데호텔 도쿄 예약이 완료되었습니다.",
+    "embedding": [0.0871, 0.0023, ...]
+  },
+  "memory": null,
+  "reservation": {
+    "type": "accommodation",
+    "bookingUrl": "https://booking.tripai.app/stays/HTL-20260501-A3K9PQ",
+    "externalRefId": "HTL-20260501-A3K9PQ",
+    "detail": {
+      "name": "롯데호텔 도쿄",
+      "check_in": "2026-05-01",
+      "check_out": "2026-05-03",
+      "rooms": 1,
+      "guests": 2
+    },
+    "totalPrice": 450000.00,
     "currency": "KRW",
     "reservedAt": "2026-05-01T09:00:00+09:00"
   }
@@ -363,10 +422,33 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 | type | Y | `String` | `"flight"` / `"accommodation"` |
 | bookingUrl | N | `String` | AI가 제공한 예약 링크 |
 | externalRefId | N | `String` | 외부 예약 번호 |
-| detail | Y | `Object` | 예약 유형별 상세. `POST /api/v1/reservations` 명세 §4.2 구조와 동일 |
+| detail | Y | `Object` | 예약 유형별 상세. 아래 `detail 구조` 참고 |
 | totalPrice | N | `Decimal` | 총 결제 금액 |
 | currency | N | `String` | 통화 코드. 미전송 시 `"KRW"` 적용 |
 | reservedAt | N | `ISO-8601 + offset` | 예약 완료 일시 |
+
+### **detail 구조 (type별)**
+
+**type: `"flight"`**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `airline` | `String` | 항공사명 |
+| `departure` | `String` | 출발 공항 IATA 코드 (예: `"ICN"`) |
+| `arrival` | `String` | 도착 공항 IATA 코드 (예: `"NRT"`) |
+| `departing_at` | `String` | 출발 일시. ISO 8601 (예: `"2026-05-01T09:00:00"`) |
+| `arriving_at` | `String` | 도착 일시. ISO 8601 (예: `"2026-05-01T11:30:00"`) |
+| `stops` | `Int` | 경유 횟수. 직항이면 `0` |
+
+**type: `"accommodation"`**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `String` | 숙소명 |
+| `check_in` | `String` | 체크인 날짜. `YYYY-MM-DD` |
+| `check_out` | `String` | 체크아웃 날짜. `YYYY-MM-DD` |
+| `rooms` | `Int` | 객실 수 |
+| `guests` | `Int` | 투숙 인원 수 |
 
 > `itineraryId`는 payload에 포함하지 않습니다. Spring Boot가 `roomId`로 조회합니다.
 > 
@@ -417,7 +499,7 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
     - DB `chat_rooms`: `ai_summary`, `preferences` 직접 조회 → 조회 후 Redis `memory:{roomId}` 동기화 (fire-and-forget)
     - DB `chat_messages`: 최근 20개 대화 이력 (시간 역순 조회 후 pydantic-ai ModelMessage 변환)
     - DB `chat_messages` (pgvector): 유사 과거 메시지 최대 5개 (코사인 유사도 기준)
-    - DB `itineraries`: 현재 여행 일정 전체 (destination·start_date·end_date·budget·adult_count·child_count·child_ages·day_plans 포함)
+    - DB `itineraries`: 현재 여행 일정 전체 (destinations·start_date·end_date·budget·adult_count·child_count·child_ages·day_plans 포함)
 3. **Agent 처리 및 type 판별**: 대화 이력, memory, 사용자 메시지를 기반으로 Agent가 요청 의도를 분석하고 `type`을 판별합니다.
     - `"chat"`
     - `"itinerary"`
@@ -478,8 +560,8 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
         - 신규 일정이면 `status = "todo"`
         - `time` 기준 오름차순 정렬
     - `"change"` → `itinerary_logs` 스냅샷 저장 → `itineraries` 기본 정보 갱신
+        - `destinations` 포함 시 배열 전체 교체, `start_date`/`end_date` 함께 갱신, `total_days`는 Spring Boot에서 `(end_date - start_date + 1)`로 재계산
         - 날짜 범위 변경 시 `day_plans` 키 조정
-        - `destination`은 수정하지 않음
     - `"reservation"` → `itineraryRepository.findByRoomId(roomId)`로 `itineraryId` 조회 → `reservations` 저장
         - `bookedBy = "ai"`
         - `status = "confirmed"`
@@ -537,7 +619,7 @@ Spring Boot가 done.memory를 받아 DB chat_rooms 저장
 
 | 상황 | Spring Boot 응답 | 원인 |
 | --- | --- | --- |
-| 60초 내 스트림 미완료 | `504 Gateway Timeout` | `TimeoutException` |
+| 180초 내 스트림 미완료 | `504 Gateway Timeout` | `TimeoutException` |
 | FastAPI 서버 연결 불가 | `503 Service Unavailable` | `WebClientRequestException` |
 | FastAPI 4xx / 5xx 응답 | `502 Bad Gateway` | `WebClientResponseException` |
 | 알 수 없는 SSE event type | 해당 이벤트 무시 (`log.warn`) | - |
