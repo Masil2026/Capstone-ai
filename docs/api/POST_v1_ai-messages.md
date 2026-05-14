@@ -350,6 +350,8 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 
 **SSE Event:** `done`
 
+**항공권 예시**
+
 ```json
 {
   "type": "reservation",
@@ -358,34 +360,55 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
     "embedding": [0.0231, -0.1234, ...]
   },
   "assistantMessage": {
-    "content": "대한항공 KE123편을 예약했습니다.",
+    "content": "대한항공편을 예약했습니다.",
     "embedding": [0.0871, 0.0023, ...]
   },
   "memory": null,
   "reservation": {
     "type": "flight",
-    "bookingUrl": "https://booking.example.com/flight/123",
-    "externalRefId": "KE12345678",
+    "bookingUrl": "https://booking.tripai.app/flights/FLT-20260501-B7XM2R",
+    "externalRefId": "FLT-20260501-B7XM2R",
     "detail": {
       "airline": "대한항공",
-      "flight_no": "KE123",
-      "departure": {
-        "airport": "ICN",
-        "datetime": "2026-05-01T09:00:00"
-      },
-      "arrival": {
-        "airport": "NRT",
-        "datetime": "2026-05-01T11:30:00"
-      },
-      "seat_class": "economy",
-      "passengers": [
-        {
-          "name": "홍길동",
-          "passport": "M12345678"
-        }
-      ]
+      "departure": "ICN",
+      "arrival": "NRT",
+      "departing_at": "2026-05-01T09:00:00",
+      "arriving_at": "2026-05-01T11:30:00",
+      "stops": 0
     },
     "totalPrice": 320000.00,
+    "currency": "KRW",
+    "reservedAt": "2026-05-01T09:00:00+09:00"
+  }
+}
+```
+
+**숙소 예시**
+
+```json
+{
+  "type": "reservation",
+  "userMessage": {
+    "content": "숙소 예약해줘",
+    "embedding": [0.0231, -0.1234, ...]
+  },
+  "assistantMessage": {
+    "content": "롯데호텔 도쿄 예약이 완료되었습니다.",
+    "embedding": [0.0871, 0.0023, ...]
+  },
+  "memory": null,
+  "reservation": {
+    "type": "accommodation",
+    "bookingUrl": "https://booking.tripai.app/stays/HTL-20260501-A3K9PQ",
+    "externalRefId": "HTL-20260501-A3K9PQ",
+    "detail": {
+      "name": "롯데호텔 도쿄",
+      "check_in": "2026-05-01",
+      "check_out": "2026-05-03",
+      "rooms": 1,
+      "guests": 2
+    },
+    "totalPrice": 450000.00,
     "currency": "KRW",
     "reservedAt": "2026-05-01T09:00:00+09:00"
   }
@@ -399,10 +422,33 @@ FastAPI는 세 종류의 SSE 이벤트를 순서대로 전송합니다.
 | type | Y | `String` | `"flight"` / `"accommodation"` |
 | bookingUrl | N | `String` | AI가 제공한 예약 링크 |
 | externalRefId | N | `String` | 외부 예약 번호 |
-| detail | Y | `Object` | 예약 유형별 상세. `POST /api/v1/reservations` 명세 §4.2 구조와 동일 |
+| detail | Y | `Object` | 예약 유형별 상세. 아래 `detail 구조` 참고 |
 | totalPrice | N | `Decimal` | 총 결제 금액 |
 | currency | N | `String` | 통화 코드. 미전송 시 `"KRW"` 적용 |
 | reservedAt | N | `ISO-8601 + offset` | 예약 완료 일시 |
+
+### **detail 구조 (type별)**
+
+**type: `"flight"`**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `airline` | `String` | 항공사명 |
+| `departure` | `String` | 출발 공항 IATA 코드 (예: `"ICN"`) |
+| `arrival` | `String` | 도착 공항 IATA 코드 (예: `"NRT"`) |
+| `departing_at` | `String` | 출발 일시. ISO 8601 (예: `"2026-05-01T09:00:00"`) |
+| `arriving_at` | `String` | 도착 일시. ISO 8601 (예: `"2026-05-01T11:30:00"`) |
+| `stops` | `Int` | 경유 횟수. 직항이면 `0` |
+
+**type: `"accommodation"`**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | `String` | 숙소명 |
+| `check_in` | `String` | 체크인 날짜. `YYYY-MM-DD` |
+| `check_out` | `String` | 체크아웃 날짜. `YYYY-MM-DD` |
+| `rooms` | `Int` | 객실 수 |
+| `guests` | `Int` | 투숙 인원 수 |
 
 > `itineraryId`는 payload에 포함하지 않습니다. Spring Boot가 `roomId`로 조회합니다.
 > 
