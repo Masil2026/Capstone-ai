@@ -1,19 +1,6 @@
 import pytest
-from datetime import datetime, timezone
 from app.services.adapters.flight_api import FlightAdapter
 from app.services.travel_agent_service import TravelAgentService
-
-
-def _calc_duration(departing_at: str, arriving_at: str) -> str:
-    try:
-        dep = datetime.fromisoformat(departing_at)
-        arr = datetime.fromisoformat(arriving_at)
-        delta = arr.astimezone(timezone.utc) - dep.astimezone(timezone.utc)
-        total_minutes = int(delta.total_seconds() // 60)
-        h, m = divmod(total_minutes, 60)
-        return f"{h}h {m:02d}m"
-    except Exception:
-        return "?"
 
 
 def _print_flight_results(test_name, result):
@@ -32,7 +19,7 @@ def _print_flight_results(test_name, result):
             stop_text = "Direct" if flight['stops'] == 0 else f"{flight['stops']} Stop"
             route = f"{flight['origin']}->{flight['destination']}"
             price_str = f"{flight['currency']} {flight['price_original']} ({flight.get('price_krw', '?'):,}원)"
-            duration = _calc_duration(flight['departing_at'], flight['arriving_at'])
+            duration = flight.get('duration', '?')
             print(f"{i:<3} | {flight['airline']:<18} | {route:<11} | {price_str:<30} | {stop_text:<7} | {flight['departing_at']:<22} | {flight['arriving_at']:<22} | {duration}")
 
     print("="*105 + "\n")
@@ -67,9 +54,9 @@ async def test_flight_search_adults_only():
     service = TravelAgentService({"duffel_flight": adapter})
 
     params = {
-        "origin": "zurich", "destination": "london",
-        "departure_date": "2026-12-20",
-        "adults": 2
+        "origin": "incheon", "destination": "canada",
+        "departure_date": "2026-05-15",
+        "adults": 1
     }
 
     result = await service.process_task("duffel_flight", "search_flights", params)

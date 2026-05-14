@@ -237,6 +237,7 @@ class SelectedFlight(BaseModel):
     destination: str
     departing_at: str   # ISO 8601
     arriving_at: str
+    duration: str = "?"  # tools에서 계산된 비행시간 (예: "13h 15m"). LLM이 계산하지 않음
     price_original: float
     currency: str
     price_krw: int
@@ -417,6 +418,7 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
                     lines.append(
                         f"  - {f.get('airline')} | {f.get('origin')}→{f.get('destination')} | "
                         f"{f.get('departing_at','')} ~ {f.get('arriving_at','')} | "
+                        f"비행시간 {f.get('duration','?')} | "
                         f"{f.get('price_original','?')} {f.get('currency','?')} ({f.get('price_krw',0):,}원) | {f.get('stops',0)}회 경유"
                     )
             else:
@@ -612,12 +614,7 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "   항공 이동 항목 note에 반드시 포함: '출발 HH:MM (공항코드, 시간대) | 도착 HH:MM (공항코드, 시간대) | 총 비행시간 약 Xh Ym | 시차 ±Yh | 직항 or N회 경유'",
         "   예) note='출발 11:30 ICN (KST+9) | 도착 16:45 STN (GMT+0) | 총 비행시간 약 13h 15m | 시차 -9h | 직항'",
         "   예) note='출발 09:00 ICN (KST+9) | 도착 14:30 CDG (CET+1) | 총 비행시간 약 12h 30m | 시차 -8h | 1회 경유'",
-        "⚠️ 비행시간 계산: departing_at ~ arriving_at의 UTC 시각 차이로 계산. 현지 시각으로 빼면 시차 오류 — 절대 금지.",
-        "   예) departing_at='2026-12-22T11:00:00+09:00'(UTC 02:00), arriving_at='2026-12-22T13:30:00+01:00'(UTC 12:30)",
-        "       비행시간 = 12:30 - 02:00 = 10h 30m  (현지 차이 2h 30m로 계산하면 틀림)",
-        "   ⚠️ 날짜가 다른 경우(다음날 도착): 날짜 차이도 반드시 포함해서 계산.",
-        "   예) departing_at='2026-12-24T11:30:00+00:00'(UTC Dec24 11:30), arriving_at='2026-12-25T13:10:00+01:00'(UTC Dec25 12:10)",
-        "       비행시간 = (Dec25 12:10) - (Dec24 11:30) = 24h 40m  (시간만 빼면 1h 40m → 완전히 틀림)",
+        "⚠️ 비행시간: ## 선택된 항공편의 duration 값을 그대로 사용. 직접 계산 절대 금지.",
         "⚠️ 하루의 끝은 23:59로 표기한다. 24:00은 절대 사용하지 않는다. 다음 날 시작은 반드시 00:00 사용.",
         "   예) 전날 항공: time='20:07 ~ 23:59' / 다음날 기내 연속: time='00:00 ~ 21:22'",
         "⚠️ 항공 외 일반 일정은 자정을 넘으면 별도 항목 분리.",
@@ -715,7 +712,7 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         lines.append(
             f"- [leg_index={fl.leg_index}, {fl.direction}] {fl.airline} | "
             f"{fl.origin}→{fl.destination} | "
-            f"{fl.departing_at} ~ {fl.arriving_at} | {fl.price_krw:,}원 ({fl.currency} {fl.price_original}) | {stops_str}"
+            f"{fl.departing_at} ~ {fl.arriving_at} | 비행시간 {fl.duration} | {fl.price_krw:,}원 ({fl.currency} {fl.price_original}) | {stops_str}"
         )
 
     lines += ["", "## 선택된 숙소"]

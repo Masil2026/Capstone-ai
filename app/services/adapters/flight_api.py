@@ -1,8 +1,39 @@
+import re
 import httpx
 from app.core.ApiToolsInterfaces import ApiTools
 from app.core.config import settings
 from app.services.adapters.currency_converter import to_krw
 from typing import Any, Dict
+
+
+def _parse_iso_duration(iso_duration: str) -> int | None:
+    """ISO 8601 duration(PT14H44M)을 총 분으로 변환. 파싱 불가 시 None."""
+    if not iso_duration:
+        return None
+    match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?', iso_duration)
+    if not match:
+        return None
+    return int(match.group(1) or 0) * 60 + int(match.group(2) or 0)
+
+
+def _format_duration(total_minutes: int) -> str:
+    h, m = divmod(total_minutes, 60)
+    return f"{h}h {m:02d}m"
+
+
+def _get_duration(slice_: dict, segments: list) -> str:
+    """slice.duration 우선, 없으면 세그먼트 합산(레이오버 제외)으로 fallback."""
+    minutes = _parse_iso_duration(slice_.get("duration", ""))
+    if minutes is not None:
+        return _format_duration(minutes)
+    # fallback: 세그먼트별 비행 시간 합산 (경유 대기 시간 미포함)
+    total = 0
+    for seg in segments:
+        m = _parse_iso_duration(seg.get("duration", ""))
+        if m is None:
+            return "?"
+        total += m
+    return _format_duration(total) + "*"  # *: 레이오버 제외한 순수 비행 시간
 
 class FlightAdapter(ApiTools):
     def __init__(self):
@@ -168,7 +199,8 @@ class FlightAdapter(ApiTools):
                     print(f"[FlightAdapter] 실제 항공사 결과 없음 → Duffel Airways fallback 사용 ({len(real_offers)}개)")
                 processed_results = []
                 for offer in real_offers[:10]:
-                    segments = offer["slices"][0]["segments"]
+                    slice_ = offer["slices"][0]
+                    segments = slice_["segments"]
                     orig_amount = float(offer["total_amount"])
                     orig_currency = offer["total_currency"]
                     price_krw = await to_krw(orig_amount, orig_currency)
@@ -183,6 +215,7 @@ class FlightAdapter(ApiTools):
                         "departing_at": segments[0]["departing_at"],
                         "arriving_at": segments[-1]["arriving_at"],
                         "stops": len(segments) - 1, # 경유 횟수 (0개면 직항, 1개면 1회 경유)
+                        "duration": _get_duration(slice_, segments),
                     })
                 processed_results.sort(key=lambda x: (x["stops"], x["price_krw"]))
 
