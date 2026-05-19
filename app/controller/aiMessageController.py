@@ -40,6 +40,21 @@ _ORDINAL_INDEX = {
     "두": 1,
     "세": 2,
 }
+_ITINERARY_CHANGE_KEYWORDS = (
+    "숙소",
+    "호텔",
+    "체크인",
+    "항공",
+    "항공편",
+    "비행편",
+    "비행기",
+    "출발",
+    "도착",
+)
+_CHANGE_INTENT_KEYWORDS = ("바꿔", "변경", "수정", "교체", "다른", "새로")
+_CANCEL_INTENT_KEYWORDS = ("취소", "캔슬")
+_RESERVATION_INTENT_KEYWORDS = ("예약", "예매", "새로 잡아", "다시 잡아")
+_RESERVATION_CHANGE_CONFIRM_MESSAGE = "기존 예약을 취소하고 새로 예약할까요?"
 
 
 def _build_cancel_list_message(reservations: list[dict]) -> str:
@@ -126,6 +141,52 @@ def _build_cancel_done_message(reservation: dict) -> str:
 
     name = detail.get("name") or "숙소"
     return f"{name} 예약 취소 요청을 접수했습니다. 예약번호: {ref}"
+
+
+def _has_any_keyword(user_message: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in user_message for keyword in keywords)
+
+
+def _is_itinerary_item_change_request(user_message: str) -> bool:
+    return (
+        _has_any_keyword(user_message, _ITINERARY_CHANGE_KEYWORDS)
+        and _has_any_keyword(user_message, _CHANGE_INTENT_KEYWORDS)
+    )
+
+
+def _has_explicit_cancel_or_reservation_intent(user_message: str) -> bool:
+    return (
+        _has_any_keyword(user_message, _CANCEL_INTENT_KEYWORDS)
+        or _has_any_keyword(user_message, _RESERVATION_INTENT_KEYWORDS)
+    )
+
+
+def _should_confirm_reservation_change(user_message: str, reservations: list[dict]) -> bool:
+    """활성 예약이 있는 항공/숙소 변경 요청은 취소 여부를 먼저 확인한다."""
+    return (
+        bool(reservations)
+        and _is_itinerary_item_change_request(user_message)
+        and not _has_explicit_cancel_or_reservation_intent(user_message)
+    )
+
+
+def _correct_request_type(request_type: str, user_message: str, current_itinerary: dict | None) -> str:
+    """classification 결과를 런타임 컨텍스트로 안전하게 보정한다."""
+    if (
+        current_itinerary
+        and _is_itinerary_item_change_request(user_message)
+        and not _has_explicit_cancel_or_reservation_intent(user_message)
+    ):
+        return "itinerary"
+    if request_type == "cancel" and not _has_any_keyword(user_message, _CANCEL_INTENT_KEYWORDS):
+        return "itinerary" if _is_itinerary_item_change_request(user_message) else "chat"
+    if (
+        request_type != "reservation"
+        and not _has_any_keyword(user_message, _CANCEL_INTENT_KEYWORDS)
+        and _has_any_keyword(user_message, _RESERVATION_INTENT_KEYWORDS)
+    ):
+        return "reservation"
+    return request_type
 
 
 def _get_cancel_intercept_message(user_message: str, reservations: list[dict]) -> str | None:
@@ -265,6 +326,29 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         request_type = cls_result.output.type
     except Exception:
         request_type = "chat"
+    request_type = _correct_request_type(request_type, user_message, ctx["current_itinerary"])
+
+    if _should_confirm_reservation_change(user_message, ctx.get("reservations", [])):
+        yield _sse("chunk", {"content": _RESERVATION_CHANGE_CONFIRM_MESSAGE})
+        try:
+            assistant_embedding = await get_user_embedding(_RESERVATION_CHANGE_CONFIRM_MESSAGE)
+        except Exception:
+            assistant_embedding = None
+        done = _build_done_event(
+            request_type="chat",
+            user_message=user_message,
+            user_embedding=ctx["user_embedding"],
+            full_response=_RESERVATION_CHANGE_CONFIRM_MESSAGE,
+            assistant_embedding=assistant_embedding,
+            orch_result=OrchestratorResult(message=_RESERVATION_CHANGE_CONFIRM_MESSAGE),
+            merged_summary=ctx["ai_summary"],
+            merged_prefs=ctx["preferences"],
+        )
+        if hide_embedding:
+            done.userMessage.embedding = None
+            done.assistantMessage.embedding = None
+        yield _sse("done", _exclude_none(done.model_dump(), keep_null_keys=frozenset({"amount_krw"})))
+        return
 
     # [3] OrchestratorDeps 조립
     deps = OrchestratorDeps(

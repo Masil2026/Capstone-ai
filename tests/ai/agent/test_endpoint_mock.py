@@ -61,13 +61,28 @@ _EXISTING_ITINERARY = {
         ],
     },
 }
+_ACTIVE_HOTEL_RESERVATION = {
+    "id": "res-hotel-001",
+    "type": "accommodation",
+    "external_ref_id": "HTL-20260515-ABC123",
+    "total_price": 450000,
+    "currency": "KRW",
+    "detail": {
+        "name": "신주쿠 호텔",
+        "check_in": "2026-05-15",
+        "check_out": "2026-05-18",
+    },
+}
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 
-def _make_ctx(*, day_plans=None, use_existing_memory=True):
+def _make_ctx(*, day_plans=None, use_existing_memory=True, reservations=None, current_itinerary=None):
     """load_context 반환값 픽스처"""
-    itinerary = {**_EXISTING_ITINERARY, "day_plans": day_plans} if day_plans is not None else _EXISTING_ITINERARY
+    if current_itinerary is not None:
+        itinerary = current_itinerary
+    else:
+        itinerary = {**_EXISTING_ITINERARY, "day_plans": day_plans} if day_plans is not None else _EXISTING_ITINERARY
     return {
         "user_embedding": _FIXED_EMBEDDING,
         "history": [],
@@ -75,6 +90,7 @@ def _make_ctx(*, day_plans=None, use_existing_memory=True):
         "preferences": _EXISTING_PREFERENCES if use_existing_memory else None,
         "similar_messages": [],
         "current_itinerary": itinerary,
+        "reservations": reservations if reservations is not None else [],
     }
 
 
@@ -343,3 +359,105 @@ async def test_ai_summary_list_normalized_before_done_and_save_memory():
     mock_save.assert_awaited_once()
     _, saved_summary, _ = mock_save.call_args.args
     assert saved_summary == expected_summary
+
+
+@pytest.mark.asyncio
+async def test_hotel_change_with_reservation_returns_chat_confirmation():
+    """활성 예약이 있으면 호텔 변경 요청을 cancel로 보내지 않고 확인 메시지로 응답한다."""
+    ctx = _make_ctx(reservations=[_ACTIVE_HOTEL_RESERVATION])
+
+    with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
+         patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
+         patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
+         patch("app.controller.aiMessageController.run_itinerary_pipeline") as mock_pipeline, \
+         patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
+         patch("app.controller.aiMessageController.save_memory"):
+
+        mock_cls_agent.run = AsyncMock(return_value=_mock_cls("cancel"))
+        events = await _call_endpoint("호텔 바꿔줘")
+
+    _assert_no_error(events)
+    done = _done(events)
+
+    assert done["type"] == "chat"
+    assert "기존 예약을 취소하고 새로 예약할까요?" in done["assistantMessage"]["content"]
+    assert done.get("cancel") is None
+    mock_orch.run_stream.assert_not_called()
+    mock_pipeline.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hotel_change_without_reservation_routes_to_itinerary():
+    """활성 예약이 없으면 호텔 변경 요청을 itinerary로 보정해 처리한다."""
+    mock_result = OrchestratorResult(
+        message="호텔 체크인 일정을 다른 숙소 기준으로 조정했습니다.",
+        ai_summary="3. 호텔 변경 요청 반영",
+        day_plans={
+            "2026-05-15": [
+                DayPlanItem(plan_name="새 호텔 체크인", time="15:00 ~ 16:00", place="긴자 호텔"),
+            ],
+        },
+    )
+    ctx = _make_ctx(reservations=[])
+
+    async def _mock_pipeline_hotel_change(*_, **__):
+        yield mock_result.message
+        yield mock_result
+
+    with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
+         patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
+         patch("app.controller.aiMessageController.run_itinerary_pipeline", new=_mock_pipeline_hotel_change), \
+         patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
+         patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
+         patch("app.controller.aiMessageController.save_memory"):
+
+        mock_cls_agent.run = AsyncMock(return_value=_mock_cls("cancel"))
+        events = await _call_endpoint("호텔 바꿔줘")
+
+    _assert_no_error(events)
+    done = _done(events)
+
+    assert done["type"] == "itinerary"
+    assert done["itinerary"]["dayPlans"]["2026-05-15"][0]["plan_name"] == "새 호텔 체크인"
+    mock_orch.run_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rebook_after_cancel_routes_to_reservation():
+    """cancel 후 새 예약 의도가 있으면 reservation으로 보정한다."""
+    mock_result = OrchestratorResult(
+        message="새 예약 후보를 확인했습니다.",
+        reservation={
+            "reservation_type": "accommodation",
+            "detail": {"name": "긴자 호텔", "check_in": "2026-05-15", "check_out": "2026-05-18"},
+            "external_ref_id": "HTL-20260515-NEW001",
+        },
+    )
+
+    async def _stream_output():
+        yield mock_result
+
+    @asynccontextmanager
+    async def _mock_run_stream(*_, **__):
+        m = MagicMock()
+        m.stream_output = _stream_output
+        m.get_output = AsyncMock(return_value=mock_result)
+        yield m
+
+    ctx = _make_ctx(reservations=[])
+
+    with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
+         patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
+         patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
+         patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
+         patch("app.controller.aiMessageController.save_memory"):
+
+        mock_cls_agent.run = AsyncMock(return_value=_mock_cls("chat"))
+        mock_orch.run_stream = _mock_run_stream
+        events = await _call_endpoint("새로 잡아줘")
+
+    _assert_no_error(events)
+    done = _done(events)
+
+    assert done["type"] == "reservation"
+    assert done["reservation"]["externalRefId"] == "HTL-20260515-NEW001"
