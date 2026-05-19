@@ -63,6 +63,14 @@ async def load_memory(room_id: str) -> dict | None:
     return json.loads(data)
 
 
-async def save_memory(room_id: str, ai_summary: str | None, preferences: dict | None) -> None:
-    payload = {"ai_summary": ai_summary, "preferences": preferences}
+def _normalize_ai_summary(ai_summary: str | list[str] | None) -> str | None:
+    if ai_summary is None:
+        return None
+    if isinstance(ai_summary, list):
+        return "\n".join(str(item) for item in ai_summary if item is not None)
+    return ai_summary
+
+
+async def save_memory(room_id: str, ai_summary: str | list[str] | None, preferences: dict | None) -> None:
+    payload = {"ai_summary": _normalize_ai_summary(ai_summary), "preferences": preferences}
     await _redis.set(f"memory:{room_id}", json.dumps(payload, ensure_ascii=False))
