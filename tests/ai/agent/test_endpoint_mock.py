@@ -300,3 +300,46 @@ async def test_chat_memory_unchanged_save_memory_not_called():
     assert done.get("memory") is None, \
         f"chat에서 변화 없으면 memory=null이어야 함: {done.get('memory')}"
     mock_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ai_summary_list_normalized_before_done_and_save_memory():
+    """ai_summary가 list로 들어와도 done 이벤트와 save_memory에는 문자열로 정규화된다."""
+    summary_list = [
+        "1. 제주도 3박 4일 일정 생성",
+        "2. 해산물 식당 요청 반영",
+    ]
+    expected_summary = "\n".join(summary_list)
+    mock_result = OrchestratorResult(
+        message="제주도 3박 4일 일정을 생성했습니다.",
+        ai_summary=summary_list,
+        preferences={},
+        day_plans={
+            "2026-05-15": [
+                DayPlanItem(plan_name="공항 도착", time="14:00 ~ 15:00", place="제주공항"),
+            ],
+        },
+    )
+    ctx = _make_ctx(day_plans=None, use_existing_memory=False)
+
+    async def _mock_pipeline_list_summary(*_, **__):
+        yield mock_result.message
+        yield mock_result
+
+    with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
+         patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
+         patch("app.controller.aiMessageController.run_itinerary_pipeline", new=_mock_pipeline_list_summary), \
+         patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
+         patch("app.controller.aiMessageController.save_memory") as mock_save:
+
+        mock_cls_agent.run = AsyncMock(return_value=_mock_cls("itinerary"))
+        events = await _call_endpoint("제주도 3박 4일 일정 짜줘.")
+
+    _assert_no_error(events)
+    done = _done(events)
+
+    assert done["type"] == "itinerary"
+    assert done["memory"]["aiSummary"] == expected_summary
+    mock_save.assert_awaited_once()
+    _, saved_summary, _ = mock_save.call_args.args
+    assert saved_summary == expected_summary
