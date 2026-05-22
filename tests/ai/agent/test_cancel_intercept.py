@@ -15,7 +15,6 @@ cancel 선처리(pre-check) 테스트
   pytest tests/ai/agent/test_cancel_intercept.py -s
 """
 import json
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -27,8 +26,6 @@ from app.controller.aiMessageController import (
     _user_targets_cancel_item,
 )
 from app.core.config import settings
-from app.schemas.ai_message import OrchestratorResult
-
 # ── 공통 픽스처 ────────────────────────────────────────────────────────────────
 
 _HEADERS = {
@@ -188,7 +185,7 @@ class TestUserTargetsCancelItem:
         assert _user_targets_cancel_item("두 번째 취소해줘", _RESERVATIONS) is True
 
     def test_세번째_지목(self):
-        assert _user_targets_cancel_item("세 번째 거 취소", _RESERVATIONS) is True
+        assert _user_targets_cancel_item("세 번째 거 취소", _RESERVATIONS) is False
 
     def test_IATA_코드_지목(self):
         assert _user_targets_cancel_item("ICN 출발 항공편 취소", _RESERVATIONS) is True
@@ -212,9 +209,8 @@ class TestUserTargetsCancelItem:
         assert _user_targets_cancel_item("다 취소해줘", _RESERVATIONS) is False
 
     def test_번호_지목_예약목록_무관(self):
-        # "1번" 패턴은 예약 목록이 비어 있어도 매칭됨.
-        # 빈 목록 가드는 _get_cancel_intercept_message에서 먼저 처리한다.
-        assert _user_targets_cancel_item("1번 취소해줘", []) is True
+        # 직접 payload를 만들려면 실제 예약 객체를 선택할 수 있어야 한다.
+        assert _user_targets_cancel_item("1번 취소해줘", []) is False
 
     def test_짧은_식별자_무시(self):
         # 2글자 이하 identifier는 매칭하지 않음
@@ -324,22 +320,9 @@ async def test_cancel_vague_emits_chunk_before_done():
 
 
 @pytest.mark.asyncio
-async def test_cancel_specific_item_delegates_to_orchestrator():
-    """특정 항목 지목 → 오케스트레이터에 위임, type=cancel"""
+async def test_cancel_specific_item_builds_payload_without_orchestrator():
+    """특정 항목 지목 → 오케스트레이터 호출 없이 cancel payload 직접 생성"""
     ctx = _make_ctx(reservations=_RESERVATIONS)
-    mock_result = OrchestratorResult(
-        message="대한항공 ICN→NRT 항공편 예약을 취소했습니다.",
-    )
-
-    async def _stream_output():
-        yield mock_result
-
-    @asynccontextmanager
-    async def _mock_run_stream(*_, **__):
-        m = MagicMock()
-        m.stream_output = _stream_output
-        m.get_output = AsyncMock(return_value=mock_result)
-        yield m
 
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls, \
@@ -348,8 +331,6 @@ async def test_cancel_specific_item_delegates_to_orchestrator():
          patch("app.controller.aiMessageController.save_memory"):
 
         mock_cls.run = AsyncMock(return_value=_mock_cls("cancel"))
-        mock_orch.run_stream = _mock_run_stream
-
         events = await _call_endpoint("1번 취소해줘")
 
     _assert_no_error(events)
@@ -357,24 +338,15 @@ async def test_cancel_specific_item_delegates_to_orchestrator():
     _print_done("cancel_specific_by_number", done)
 
     assert done["type"] == "cancel"
+    assert done["cancel"]["reservationId"] == "res-flight-uuid-001"
     assert "취소" in done["assistantMessage"]["content"]
+    mock_orch.run_stream.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_cancel_specific_by_name_delegates_to_orchestrator():
-    """숙소명으로 특정 항목 지목 → 오케스트레이터에 위임"""
+async def test_cancel_specific_by_name_builds_payload_without_orchestrator():
+    """숙소명으로 특정 항목 지목 → 오케스트레이터 호출 없이 cancel payload 직접 생성"""
     ctx = _make_ctx(reservations=_RESERVATIONS)
-    mock_result = OrchestratorResult(message="롯데호텔 도쿄 예약을 취소했습니다.")
-
-    async def _stream_output():
-        yield mock_result
-
-    @asynccontextmanager
-    async def _mock_run_stream(*_, **__):
-        m = MagicMock()
-        m.stream_output = _stream_output
-        m.get_output = AsyncMock(return_value=mock_result)
-        yield m
 
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls, \
@@ -383,8 +355,6 @@ async def test_cancel_specific_by_name_delegates_to_orchestrator():
          patch("app.controller.aiMessageController.save_memory"):
 
         mock_cls.run = AsyncMock(return_value=_mock_cls("cancel"))
-        mock_orch.run_stream = _mock_run_stream
-
         events = await _call_endpoint("롯데호텔 도쿄 취소해줘")
 
     _assert_no_error(events)
@@ -392,3 +362,5 @@ async def test_cancel_specific_by_name_delegates_to_orchestrator():
     _print_done("cancel_specific_by_name", done)
 
     assert done["type"] == "cancel"
+    assert done["cancel"]["reservationId"] == "res-hotel-uuid-002"
+    mock_orch.run_stream.assert_not_called()

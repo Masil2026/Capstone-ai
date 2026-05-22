@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
 
+AiSummary = str | list[str] | None
+
 
 # ── 요청 ──────────────────────────────────────────────────────────────────────
 
@@ -79,7 +81,7 @@ class ReservationFields(BaseModel):
 class OrchestratorResult(BaseModel):
     """오케스트레이터 구조화 출력. message가 첫 번째 필드여야 스트리밍이 가능하다."""
     message: str                                        # 항상 필수 — 자연어 응답
-    ai_summary: str | None = None                      # itinerary·change 후 항상 작성
+    ai_summary: AiSummary = None                       # itinerary·change 후 항상 작성
     preferences: dict[str, Any] | None = None          # 취향 업데이트 시만
     day_plans: dict[str, list[DayPlanItem]] | None = None   # itinerary 타입
     change: ChangeFields | None = None                 # change 타입

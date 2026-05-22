@@ -1,6 +1,12 @@
+from datetime import date, timedelta
+
 import pytest
 from app.services.adapters.flight_api import FlightAdapter
 from app.services.travel_agent_service import TravelAgentService
+
+
+def _future_departure_date(days: int = 30) -> str:
+    return (date.today() + timedelta(days=days)).isoformat()
 
 
 def _print_flight_results(test_name, result):
@@ -55,7 +61,7 @@ async def test_flight_search_adults_only():
 
     params = {
         "origin": "incheon", "destination": "canada",
-        "departure_date": "2026-05-15",
+        "departure_date": _future_departure_date(),
         "adults": 1
     }
 

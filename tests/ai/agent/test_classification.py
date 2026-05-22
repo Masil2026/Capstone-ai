@@ -88,6 +88,15 @@ async def test_classification_boundary_place_vs_date():
     assert r_date.output.type == "change"
 
 
+@pytest.mark.asyncio
+async def test_classification_hotel_change_is_itinerary():
+    """항공/숙소 항목 변경 요청 → itinerary"""
+    r = await classification_agent.run("호텔 바꿔줘")
+    result: ResponseClassification = r.output
+    _print_result("hotel_change", result)
+    assert result.type == "itinerary"
+
+
 # ---------------------------------------------------------------------------
 # reservation
 # ---------------------------------------------------------------------------

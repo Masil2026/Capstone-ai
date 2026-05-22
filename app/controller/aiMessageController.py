@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.core.auth import verify_internal_token
 from app.schemas.ai_message import (
     AiMessageRequest,
+    CancelFields,
     CancelPayload,
     ChangePayload,
     DoneEvent,
@@ -34,6 +35,26 @@ router = APIRouter()
 
 _NUMBER_RE = re.compile(r'(?:^|\s)\d+\s*번|첫\s*번째|두\s*번째|세\s*번째')
 _IATA_RE = re.compile(r'\b[A-Z]{3}\b')
+_ORDINAL_INDEX = {
+    "첫": 0,
+    "두": 1,
+    "세": 2,
+}
+_ITINERARY_CHANGE_KEYWORDS = (
+    "숙소",
+    "호텔",
+    "체크인",
+    "항공",
+    "항공편",
+    "비행편",
+    "비행기",
+    "출발",
+    "도착",
+)
+_CHANGE_INTENT_KEYWORDS = ("바꿔", "변경", "수정", "교체", "다른", "새로")
+_CANCEL_INTENT_KEYWORDS = ("취소", "캔슬")
+_RESERVATION_INTENT_KEYWORDS = ("예약", "예매", "새로 잡아", "다시 잡아")
+_RESERVATION_CHANGE_CONFIRM_MESSAGE = "기존 예약을 취소하고 새로 예약할까요?"
 
 
 def _build_cancel_list_message(reservations: list[dict]) -> str:
@@ -60,13 +81,39 @@ def _build_cancel_list_message(reservations: list[dict]) -> str:
 
 def _user_targets_cancel_item(user_msg: str, reservations: list[dict]) -> bool:
     """사용자 메시지가 특정 예약을 지목하는지 확인."""
+    return _select_cancel_reservation(user_msg, reservations) is not None
+
+
+def _select_cancel_reservation(user_msg: str, reservations: list[dict]) -> dict | None:
+    """사용자 메시지에서 지목된 취소 대상 예약을 찾는다."""
     lower = user_msg.lower()
-    # "N번", "첫 번째" 등 번호 선택
-    if _NUMBER_RE.search(lower):
-        return True
+
+    # "N번" 번호 선택
+    number_match = re.search(r'(?:^|\s)(\d+)\s*번', lower)
+    if number_match:
+        index = int(number_match.group(1)) - 1
+        if 0 <= index < len(reservations):
+            return reservations[index]
+
+    # "첫 번째", "두 번째", "세 번째" 순서 선택
+    ordinal_match = re.search(r'(첫|두|세)\s*번째', lower)
+    if ordinal_match:
+        index = _ORDINAL_INDEX[ordinal_match.group(1)]
+        if 0 <= index < len(reservations):
+            return reservations[index]
+
     # IATA 코드 (예: "ICN→NRT 취소해줘")
-    if _IATA_RE.search(user_msg):
-        return True
+    iata_codes = set(_IATA_RE.findall(user_msg))
+    if iata_codes:
+        for r in reservations:
+            detail = r.get("detail") or {}
+            reservation_codes = {
+                str(detail.get("departure") or "").upper(),
+                str(detail.get("arrival") or "").upper(),
+            }
+            if iata_codes & reservation_codes:
+                return r
+
     # 예약명·항공사명·예약번호 매칭
     for r in reservations:
         detail = r.get("detail") or {}
@@ -77,8 +124,69 @@ def _user_targets_cancel_item(user_msg: str, reservations: list[dict]) -> bool:
         ]
         for ident in identifiers:
             if ident and len(ident) >= 3 and ident.lower() in lower:
-                return True
-    return False
+                return r
+    return None
+
+
+def _build_cancel_done_message(reservation: dict) -> str:
+    """선택된 예약에 대한 취소 요청 메시지를 생성한다."""
+    detail = reservation.get("detail") or {}
+    ref = reservation.get("external_ref_id") or reservation.get("id") or "알 수 없음"
+    if reservation.get("type") == "flight":
+        name = detail.get("airline") or "항공편"
+        dep = detail.get("departure", "")
+        arr = detail.get("arrival", "")
+        route = f" {dep}→{arr}" if dep or arr else ""
+        return f"{name}{route} 예약 취소 요청을 접수했습니다. 예약번호: {ref}"
+
+    name = detail.get("name") or "숙소"
+    return f"{name} 예약 취소 요청을 접수했습니다. 예약번호: {ref}"
+
+
+def _has_any_keyword(user_message: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in user_message for keyword in keywords)
+
+
+def _is_itinerary_item_change_request(user_message: str) -> bool:
+    return (
+        _has_any_keyword(user_message, _ITINERARY_CHANGE_KEYWORDS)
+        and _has_any_keyword(user_message, _CHANGE_INTENT_KEYWORDS)
+    )
+
+
+def _has_explicit_cancel_or_reservation_intent(user_message: str) -> bool:
+    return (
+        _has_any_keyword(user_message, _CANCEL_INTENT_KEYWORDS)
+        or _has_any_keyword(user_message, _RESERVATION_INTENT_KEYWORDS)
+    )
+
+
+def _should_confirm_reservation_change(user_message: str, reservations: list[dict]) -> bool:
+    """활성 예약이 있는 항공/숙소 변경 요청은 취소 여부를 먼저 확인한다."""
+    return (
+        bool(reservations)
+        and _is_itinerary_item_change_request(user_message)
+        and not _has_explicit_cancel_or_reservation_intent(user_message)
+    )
+
+
+def _correct_request_type(request_type: str, user_message: str, current_itinerary: dict | None) -> str:
+    """classification 결과를 런타임 컨텍스트로 안전하게 보정한다."""
+    if (
+        current_itinerary
+        and _is_itinerary_item_change_request(user_message)
+        and not _has_explicit_cancel_or_reservation_intent(user_message)
+    ):
+        return "itinerary"
+    if request_type == "cancel" and not _has_any_keyword(user_message, _CANCEL_INTENT_KEYWORDS):
+        return "itinerary" if _is_itinerary_item_change_request(user_message) else "chat"
+    if (
+        request_type != "reservation"
+        and not _has_any_keyword(user_message, _CANCEL_INTENT_KEYWORDS)
+        and _has_any_keyword(user_message, _RESERVATION_INTENT_KEYWORDS)
+    ):
+        return "reservation"
+    return request_type
 
 
 def _get_cancel_intercept_message(user_message: str, reservations: list[dict]) -> str | None:
@@ -86,7 +194,7 @@ def _get_cancel_intercept_message(user_message: str, reservations: list[dict]) -
     cancel 요청을 선처리.
     - 예약 없음 → 안내 메시지 반환
     - 막연한 취소 요청 → 목록 반환
-    - 특정 항목 지목 → None (오케스트레이터에 위임)
+    - 특정 항목 지목 → None (직접 cancel payload 생성)
     """
     if not reservations:
         return "취소할 수 있는 예약 내역이 없어요."
@@ -113,6 +221,47 @@ def _exclude_none(obj, keep_null_keys: frozenset[str] = frozenset()) -> object:
     if isinstance(obj, list):
         return [_exclude_none(item, keep_null_keys) for item in obj]
     return obj
+
+
+def _normalize_ai_summary(ai_summary: str | list[str] | None) -> str | None:
+    """ai_summary를 저장/응답에 쓰는 문자열 형태로 정규화한다."""
+    if ai_summary is None:
+        return None
+    if isinstance(ai_summary, list):
+        return "\n".join(str(item) for item in ai_summary if item is not None)
+    return ai_summary
+
+
+def _has_payload(payload: object) -> bool:
+    """액션 payload에 실제로 내려보낼 데이터가 있는지 확인한다."""
+    if payload is None:
+        return False
+    if isinstance(payload, dict):
+        return bool(_exclude_none(payload))
+    if isinstance(payload, (ChangePayload, CancelPayload, ItineraryPayload)):
+        return bool(_exclude_none(payload.model_dump()))
+    return True
+
+
+def _resolve_done_type(
+    request_type: str,
+    *,
+    itinerary: ItineraryPayload | None,
+    change: ChangePayload | None,
+    reservation: dict | None,
+    cancel: CancelPayload | None,
+) -> str:
+    """액션 타입인데 해당 payload가 비어 있으면 chat 타입으로 보정한다."""
+    payload_by_type = {
+        "itinerary": itinerary,
+        "change": change,
+        "reservation": reservation,
+        "cancel": cancel,
+    }
+    payload = payload_by_type.get(request_type)
+    if request_type in payload_by_type and not _has_payload(payload):
+        return "chat"
+    return request_type
 
 
 _SSE_EXAMPLE = (
@@ -177,6 +326,29 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         request_type = cls_result.output.type
     except Exception:
         request_type = "chat"
+    request_type = _correct_request_type(request_type, user_message, ctx["current_itinerary"])
+
+    if _should_confirm_reservation_change(user_message, ctx.get("reservations", [])):
+        yield _sse("chunk", {"content": _RESERVATION_CHANGE_CONFIRM_MESSAGE})
+        try:
+            assistant_embedding = await get_user_embedding(_RESERVATION_CHANGE_CONFIRM_MESSAGE)
+        except Exception:
+            assistant_embedding = None
+        done = _build_done_event(
+            request_type="chat",
+            user_message=user_message,
+            user_embedding=ctx["user_embedding"],
+            full_response=_RESERVATION_CHANGE_CONFIRM_MESSAGE,
+            assistant_embedding=assistant_embedding,
+            orch_result=OrchestratorResult(message=_RESERVATION_CHANGE_CONFIRM_MESSAGE),
+            merged_summary=ctx["ai_summary"],
+            merged_prefs=ctx["preferences"],
+        )
+        if hide_embedding:
+            done.userMessage.embedding = None
+            done.assistantMessage.embedding = None
+        yield _sse("done", _exclude_none(done.model_dump(), keep_null_keys=frozenset({"amount_krw"})))
+        return
 
     # [3] OrchestratorDeps 조립
     deps = OrchestratorDeps(
@@ -200,7 +372,39 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
 
     # [3.5] cancel 막연한 요청 선처리 — 오케스트레이터 호출 전 가로채기
     if request_type == "cancel":
-        intercept_msg = _get_cancel_intercept_message(user_message, ctx.get("reservations", []))
+        reservations = ctx.get("reservations", [])
+        selected_cancel = _select_cancel_reservation(user_message, reservations)
+        if selected_cancel is not None:
+            response_msg = _build_cancel_done_message(selected_cancel)
+            print(f"[_stream] cancel 직접 payload 생성: {selected_cancel.get('id')!r}", flush=True)
+            yield _sse("chunk", {"content": response_msg})
+            try:
+                assistant_embedding = await get_user_embedding(response_msg)
+            except Exception:
+                assistant_embedding = None
+            done = _build_done_event(
+                request_type="cancel",
+                user_message=user_message,
+                user_embedding=ctx["user_embedding"],
+                full_response=response_msg,
+                assistant_embedding=assistant_embedding,
+                orch_result=OrchestratorResult(
+                    message=response_msg,
+                    cancel=CancelFields(
+                        reservation_id=selected_cancel.get("id") or selected_cancel.get("external_ref_id") or "",
+                        cancelled_at=datetime.now().astimezone().isoformat(),
+                    ),
+                ),
+                merged_summary=ctx["ai_summary"],
+                merged_prefs=ctx["preferences"],
+            )
+            if hide_embedding:
+                done.userMessage.embedding = None
+                done.assistantMessage.embedding = None
+            yield _sse("done", _exclude_none(done.model_dump(), keep_null_keys=frozenset({"amount_krw"})))
+            return
+
+        intercept_msg = _get_cancel_intercept_message(user_message, reservations)
         if intercept_msg is not None:
             print(f"[_stream] cancel 선처리 인터셉트: {intercept_msg[:60]!r}", flush=True)
             yield _sse("chunk", {"content": intercept_msg})
@@ -296,7 +500,9 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         assistant_embedding = None
 
     # [8] memory 갱신 — Redis에만 저장, DB는 Java 백엔드가 done 이벤트의 memory 필드를 보고 씀
-    merged_summary = orch_result.ai_summary if orch_result.ai_summary is not None else ctx["ai_summary"]
+    merged_summary = _normalize_ai_summary(
+        orch_result.ai_summary if orch_result.ai_summary is not None else ctx["ai_summary"]
+    )
     # preferences: 빈 dict {}는 "변화 없음"으로 처리 → 기존 값 유지
     merged_prefs = orch_result.preferences if orch_result.preferences else ctx["preferences"]
     if orch_result.ai_summary is not None or orch_result.preferences:
@@ -332,7 +538,7 @@ def _build_done_event(
     memory_output = None
     if orch_result.ai_summary is not None or orch_result.preferences:
         memory_output = MemoryOutput(
-            aiSummary=merged_summary,
+            aiSummary=_normalize_ai_summary(merged_summary),
             preferences=merged_prefs or {},
         )
 
@@ -374,8 +580,16 @@ def _build_done_event(
             "reservedAt": r.reserved_at,
         }.items() if v is not None}
 
+    done_type = _resolve_done_type(
+        request_type,
+        itinerary=itinerary,
+        change=change,
+        reservation=reservation,
+        cancel=cancel,
+    )
+
     return DoneEvent(
-        type=request_type,
+        type=done_type,
         userMessage=MessageWithEmbedding(content=user_message, embedding=user_embedding),
         assistantMessage=MessageWithEmbedding(content=full_response, embedding=assistant_embedding),
         memory=memory_output,
