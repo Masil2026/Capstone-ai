@@ -50,8 +50,54 @@ _ITINERARY_CHANGE_KEYWORDS = (
     "비행기",
     "출발",
     "도착",
+    "공항",
+    "역",
+    "터미널",
+    "이동",
+    "교통수단",
+    "이동수단",
+    "택시",
+    "버스",
+    "공항버스",
+    "리무진",
+    "고속버스",
+    "시외버스",
+    "지하철",
+    "기차",
+    "열차",
+    "KTX",
+    "ktx",
+    "SRT",
+    "srt",
+    "대중교통",
+    "자차",
+    "자가용",
+    "렌터카",
+    "렌트카",
 )
-_CHANGE_INTENT_KEYWORDS = ("바꿔", "변경", "수정", "교체", "다른", "새로")
+_RESERVATION_ITEM_CHANGE_KEYWORDS = (
+    "숙소",
+    "호텔",
+    "체크인",
+    "항공",
+    "항공편",
+    "비행편",
+    "비행기",
+    "출발",
+    "도착",
+)
+_CHANGE_INTENT_KEYWORDS = (
+    "바꿔",
+    "변경",
+    "수정",
+    "교체",
+    "다른",
+    "새로",
+    "말고",
+    "대신",
+    "타고",
+    "이용",
+)
 _CANCEL_INTENT_KEYWORDS = ("취소", "캔슬")
 _RESERVATION_INTENT_KEYWORDS = ("예약", "예매", "새로 잡아", "다시 잡아")
 _RESERVATION_CHANGE_CONFIRM_MESSAGE = "기존 예약을 취소하고 새로 예약할까요?"
@@ -154,6 +200,13 @@ def _is_itinerary_item_change_request(user_message: str) -> bool:
     )
 
 
+def _is_reservation_item_change_request(user_message: str) -> bool:
+    return (
+        _has_any_keyword(user_message, _RESERVATION_ITEM_CHANGE_KEYWORDS)
+        and _has_any_keyword(user_message, _CHANGE_INTENT_KEYWORDS)
+    )
+
+
 def _has_explicit_cancel_or_reservation_intent(user_message: str) -> bool:
     return (
         _has_any_keyword(user_message, _CANCEL_INTENT_KEYWORDS)
@@ -165,7 +218,7 @@ def _should_confirm_reservation_change(user_message: str, reservations: list[dic
     """활성 예약이 있는 항공/숙소 변경 요청은 취소 여부를 먼저 확인한다."""
     return (
         bool(reservations)
-        and _is_itinerary_item_change_request(user_message)
+        and _is_reservation_item_change_request(user_message)
         and not _has_explicit_cancel_or_reservation_intent(user_message)
     )
 

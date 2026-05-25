@@ -97,6 +97,24 @@ async def test_classification_hotel_change_is_itinerary():
     assert result.type == "itinerary"
 
 
+@pytest.mark.asyncio
+async def test_classification_transport_change_is_itinerary():
+    """일정 내 이동수단 변경 요청 → itinerary"""
+    r = await classification_agent.run("인천공항 갈때 택시말고 버스타고 갈래")
+    result: ResponseClassification = r.output
+    _print_result("transport_change", result)
+    assert result.type == "itinerary"
+
+
+@pytest.mark.asyncio
+async def test_classification_train_transport_change_is_itinerary():
+    """KTX 등 이동수단 변경 요청 → itinerary"""
+    r = await classification_agent.run("부산 갈때 비행기 말고 KTX 타고 갈래")
+    result: ResponseClassification = r.output
+    _print_result("train_transport_change", result)
+    assert result.type == "itinerary"
+
+
 # ---------------------------------------------------------------------------
 # reservation
 # ---------------------------------------------------------------------------
