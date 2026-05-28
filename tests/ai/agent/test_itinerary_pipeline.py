@@ -25,6 +25,7 @@ from app.services.agents.itinerary_pipeline import (
     _all_dates,
     _is_transport_day,
     _get_replan_dates_for_date_change,
+    _normalize_overnight_day_plans,
     _fetch_flight_legs,
     _service,
 )
@@ -106,6 +107,63 @@ class TestIsTransportDay:
         """'공항 이동'만으로는 교통 이동일 판별 안 됨 (항공 이동·기내가 기준)"""
         item = _plan("숙소 → 인천국제공항 이동 (공항버스)")
         assert _is_transport_day([item]) is False
+
+
+# ── _normalize_overnight_day_plans ────────────────────────────────────────────
+
+class TestNormalizeOvernightDayPlans:
+    def test_split_cross_midnight_item_into_next_date(self):
+        day_plans = {
+            "2026-05-29": [
+                {
+                    "plan_name": "삼성혈해물탕 본점 저녁 식사",
+                    "time": "23:45 ~ 00:45",
+                    "place": "삼성혈해물탕 본점",
+                    "note": "",
+                    "cost": {"amount": 18000, "currency": "KRW", "amount_krw": None},
+                }
+            ]
+        }
+
+        result = _normalize_overnight_day_plans(day_plans)
+
+        assert result["2026-05-29"][0]["time"] == "23:45 ~ 23:59"
+        assert result["2026-05-29"][0]["cost"]["amount"] == 18000
+        assert result["2026-05-30"][0]["time"] == "00:00 ~ 00:45"
+        assert result["2026-05-30"][0]["cost"] is None
+
+    def test_keep_same_day_item_unchanged(self):
+        item = _plan("성산일출봉 등반")
+        item["time"] = "14:40 ~ 16:10"
+
+        result = _normalize_overnight_day_plans({"2026-05-30": [item]})
+
+        assert result == {"2026-05-30": [item]}
+
+    def test_move_early_continuation_item_when_same_bucket_has_overnight_item(self):
+        early_return = _plan("숙소 귀환 및 휴식")
+        early_return["time"] = "00:50 ~ 01:00"
+        dinner = _plan("삼성혈해물탕 본점 저녁 식사")
+        dinner["time"] = "23:45 ~ 00:45"
+
+        result = _normalize_overnight_day_plans({"2026-05-29": [early_return, dinner]})
+
+        assert [item["time"] for item in result["2026-05-29"]] == ["23:45 ~ 23:59"]
+        assert [item["time"] for item in result["2026-05-30"]] == ["00:00 ~ 00:45", "00:50 ~ 01:00"]
+
+    def test_move_early_rest_until_morning_when_same_bucket_has_late_night_items(self):
+        sleep = _plan("숙소 귀환 및 휴식")
+        sleep["time"] = "01:55 ~ 07:30"
+        sleep["note"] = "숙소에서 취침 및 휴식"
+        airport = _plan("숙소 → 인천국제공항(ICN) 이동 (택시)")
+        airport["time"] = "19:00 ~ 20:30"
+        dinner = _plan("작제도 흑돼지 장작구이 저녁 식사")
+        dinner["time"] = "23:45 ~ 00:45"
+
+        result = _normalize_overnight_day_plans({"2026-05-29": [sleep, airport, dinner]})
+
+        assert [item["time"] for item in result["2026-05-29"]] == ["19:00 ~ 20:30", "23:45 ~ 23:59"]
+        assert [item["time"] for item in result["2026-05-30"]] == ["00:00 ~ 00:45", "01:55 ~ 07:30"]
 
 
 # ── _get_replan_dates_for_date_change ─────────────────────────────────────────
