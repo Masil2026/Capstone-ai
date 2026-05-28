@@ -23,6 +23,7 @@ from app.schemas.ai_message import (
 from app.services.adapters.currency_converter import to_krw
 from app.services.agents.classification import classification_agent
 from app.services.agents.context import get_user_embedding, load_context
+from app.services.agents.itinerary_patch import try_patch_itinerary_item
 from app.services.agents.itinerary_pipeline import run_itinerary_pipeline
 from app.services.agents.memory import save_memory
 from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agent, build_context_prompt
@@ -88,6 +89,7 @@ _RESERVATION_ITEM_CHANGE_KEYWORDS = (
 )
 _CHANGE_INTENT_KEYWORDS = (
     "바꿔",
+    "바꿀",
     "변경",
     "수정",
     "교체",
@@ -488,13 +490,17 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         prompt = f"{context_block}\n\n---\n\n사용자 메시지: {user_message}"
 
         if request_type == "itinerary":
-            print("[_stream] run_itinerary_pipeline 호출", flush=True)
-            orch_result = None
-            async for item in run_itinerary_pipeline(deps, user_message, ctx["history"]):
-                if isinstance(item, str):
-                    yield _sse("chunk", {"content": item})
-                else:
-                    orch_result = item
+            print("[_stream] 부분 itinerary 패치 시도", flush=True)
+            orch_result = await try_patch_itinerary_item(deps, user_message)
+            if orch_result is not None:
+                yield _sse("chunk", {"content": orch_result.message})
+            else:
+                print("[_stream] run_itinerary_pipeline 호출", flush=True)
+                async for item in run_itinerary_pipeline(deps, user_message, ctx["history"]):
+                    if isinstance(item, str):
+                        yield _sse("chunk", {"content": item})
+                    else:
+                        orch_result = item
 
             if orch_result is None:
                 print("[_stream] pipeline None → orchestrator 스트리밍 폴백", flush=True)
