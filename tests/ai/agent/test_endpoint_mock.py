@@ -183,6 +183,7 @@ async def test_itinerary_new_all_dates_returned():
 
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
+         patch("app.controller.aiMessageController.try_patch_itinerary_item", new=AsyncMock(return_value=None)), \
          patch("app.controller.aiMessageController.run_itinerary_pipeline", new=_mock_pipeline_new), \
          patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
          patch("app.controller.aiMessageController.save_memory") as mock_save, \
@@ -240,6 +241,7 @@ async def test_itinerary_modify_only_modified_date_returned():
 
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
+         patch("app.controller.aiMessageController.try_patch_itinerary_item", new=AsyncMock(return_value=None)), \
          patch("app.controller.aiMessageController.run_itinerary_pipeline", new=_mock_pipeline_modify), \
          patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
          patch("app.controller.aiMessageController.save_memory") as mock_save, \
@@ -344,6 +346,7 @@ async def test_ai_summary_list_normalized_before_done_and_save_memory():
 
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
+         patch("app.controller.aiMessageController.try_patch_itinerary_item", new=AsyncMock(return_value=None)), \
          patch("app.controller.aiMessageController.run_itinerary_pipeline", new=_mock_pipeline_list_summary), \
          patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
          patch("app.controller.aiMessageController.save_memory") as mock_save:
@@ -406,6 +409,7 @@ async def test_hotel_change_without_reservation_routes_to_itinerary():
 
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls_agent, \
+         patch("app.controller.aiMessageController.try_patch_itinerary_item", new=AsyncMock(return_value=None)), \
          patch("app.controller.aiMessageController.run_itinerary_pipeline", new=_mock_pipeline_hotel_change), \
          patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
          patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \

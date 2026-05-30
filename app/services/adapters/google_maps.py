@@ -133,6 +133,10 @@ class GoogleMapsAdapter(ApiTools):
             "region": region,
             "key": self.api_key,
         }
+        if params.get("location"):
+            query_params["location"] = params["location"]
+        if params.get("radius"):
+            query_params["radius"] = params["radius"]
 
         debug_params = {**query_params, "key": "***REDACTED***"}
         print("\n[GoogleMapsAdapter] search_place 실제 요청 전송")

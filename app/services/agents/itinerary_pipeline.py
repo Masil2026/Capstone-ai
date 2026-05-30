@@ -18,7 +18,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 _log = logging.getLogger(__name__)
 
@@ -556,7 +556,9 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         f"  한국 도착이 {destinations[-1]['end_date'][:10]} 이후로 넘어가는 일정은 절대 금지.",
         f"  day_plans에 {destinations[-1]['end_date'][:10]} 이후 날짜 키가 생기면 안 된다.",
         "- 각 항공 이동 항목 직전: 공항 이동 항목 삽입 (출발 2~3시간 전 기준, 새벽 출발이면 심야 이동도 그대로 기재)",
-        "  예) plan_name='숙소 → 인천국제공항 이동 (공항버스/택시)', time='01:30 ~ 03:00'",
+        "  ⚠️ 공항 이동 항목의 plan_name에는 반드시 공항명과 IATA 코드를 함께 표기한다.",
+        "  예) plan_name='숙소 → 인천국제공항(ICN) 이동 (공항버스/택시)', time='01:30 ~ 03:00'",
+        "  예) plan_name='호텔 → 파리 샤를드골공항(CDG) 이동 (택시)', time='06:00 ~ 07:30'",
         "",
         "## 도시별 일정 배정",
     ]
@@ -618,15 +620,33 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "⚠️ 하루의 끝은 23:59로 표기한다. 24:00은 절대 사용하지 않는다. 다음 날 시작은 반드시 00:00 사용.",
         "   예) 전날 항공: time='20:07 ~ 23:59' / 다음날 기내 연속: time='00:00 ~ 21:22'",
         "⚠️ 항공 외 일반 일정은 자정을 넘으면 별도 항목 분리.",
+        "⚠️ 자정 이후(00:00~)에 이어지는 모든 일정은 반드시 다음 날짜의 day_plans bucket에 넣는다.",
+        "   예) 2026-05-29 '23:45 ~ 23:59 저녁 식사' 후 이어지는 '00:00 ~ 00:45 저녁 식사', '00:50 ~ 01:00 숙소 귀환'은 모두 2026-05-30 bucket에 작성.",
+        "⚠️ 같은 활동을 자정 기준으로 분리한 경우 cost는 첫 번째 조각에만 작성하고, 다음 날짜 continuation 조각의 cost는 반드시 null로 둔다.",
+        "   예) 식사 cost는 23:45~23:59 항목에만 작성, 00:00~00:45 continuation 항목은 cost=null.",
         "올바른 예) '09:00 ~ 10:30', '20:07 ~ 23:59', '00:00 ~ 21:22', '23:30 ~ 23:59', '00:00 ~ 02:15'",
+        "",
+        "## 숙소 귀환·휴식 배치 규칙",
+        "⚠️ 숙박이 있는 날짜에는 하루 마지막 외부 일정 후 반드시 숙소/호텔 귀환 및 휴식 항목을 넣는다.",
+        "   예) '관광지 → 숙소 이동 (버스/택시)' 후 '숙소 귀환 및 휴식' 또는 하나로 합쳐 '숙소 귀환 및 휴식'.",
+        "⚠️ 당일 마지막 외부 일정이 23:59에 끝나거나 자정을 넘기면, 귀환/휴식 항목은 다음 날짜 첫 항목으로 작성한다.",
+        "   예) 1일차 '23:45 ~ 23:59 저녁 식사' 다음에는 2일차 '00:00 ~ 07:30 숙소 귀환 및 휴식'을 반드시 넣는다.",
+        "⚠️ 늦은 시간에 식당·카페를 무리하게 추가하지 말고, 숙소 귀환 및 휴식을 우선 배치한다.",
+        "⚠️ 체크인 후 외부 일정이 없으면 '호텔 체크인 및 휴식'으로 하루를 마무리한다.",
+        "   단, 귀국 항공 이동 이후나 체크아웃 후 바로 공항으로 이동하는 마지막 날에는 숙소 귀환 항목을 만들지 않는다.",
         "",
         "## 식사 배치 규칙",
         "- 일반 날: 아침(08:00~09:00), 점심(12:00~13:30), 저녁(18:30~20:00) 3회 포함",
         "- 항공 도착 날: 도착 시간 + 시내 이동(약 1.5h) 이후부터 가능한 첫 식사부터 시작",
         "- 항공 출발 날: 아침 09:00부터 시작. 탑승 시간 2~3시간 전 공항 이동 전까지 관광·식사 일정 진행.",
         "  ⚠️ 출발 전 빈 시간이 생기면 '자유 시간 (산책·쇼핑 등)' 항목으로 반드시 채울 것. 공항 이동 항목만 덜렁 있으면 절대 안 됨.",
+        "⚠️ 식당·카페 영업시간을 실시간으로 확실히 확인할 수 없으므로 21:30 이후 식당·카페 방문 일정을 만들지 않는다.",
+        "   21:30 이후 도착하거나 식사 시간이 부족하면 외부 식당·카페 대신 '숙소 귀환 및 휴식', '호텔 체크인 및 휴식', '편의점 간단 식사 후 휴식'으로 대체한다.",
+        "   '심야 맛집', '늦게 운영', '야간 카페' 같은 근거 없는 표현을 note에 쓰지 않는다.",
+        "   불가피하게 22:00 이후 외부 장소를 넣어야 할 때는 note에 '운영 시간 확인 필요'라고 쓴다.",
         "- 이동 5분 이상: 별도 이동 항목 삽입 (plan_name: '{출발} → {도착} 이동 ({수단})')",
-        "- 이동 수단: 대중교통(지하철·버스·트램) / 도보 / 택시. 렌터카는 절대 이동 항목으로 넣지 않는다.",
+        "- 이동 수단: 대중교통(지하철·버스·트램·KTX·SRT·열차·고속버스·시외버스) / 도보 / 택시.",
+        "- 자차·자가용·렌터카는 사용자가 직접 요청한 경우에만 이동 항목으로 넣는다. 사용자가 말하지 않았으면 임의로 넣지 않는다.",
         "- 비 예보 날: 실내 위주 배치 후 note에 날씨 안내",
         "",
         "## cost 작성 규칙",
@@ -661,6 +681,8 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "  서울 기본 4,800원 + 약 100원/100m | 도쿄 730JPY + 약 100JPY/300m",
         "  파리 4EUR + 약 1.5EUR/km | 뉴욕 3USD + 약 2USD/km | 방콕 35THB + 약 6THB/km",
         "  distance_text 없으면 현지 물가 기준 추정. amount_krw 절대 작성 금지.",
+        "- 자차·자가용: 별도 요금을 확정할 수 없으면 cost=null. 주차비·통행료가 명확한 경우만 합산 금액 작성.",
+        "- 렌터카: 사용자가 직접 요청한 경우에만 작성. 요금이 명확하지 않으면 cost=null.",
         "- 입장료: Tavily 검색 결과가 있으면 그 값 우선 사용. 없으면 price_level(0=무료·1=저렴·2=보통·3=비쌈·4=매우 비쌈) 참고해 추정.",
         "  price_level=0이면 cost=null. 성인·아이 요금 구분 적용. amount_krw 절대 작성 금지.",
         "  [부분 유료 규칙] Tavily 결과에 무료 입장 + 유료 구역 혼재(예: 공원 입장 무료·특별관 유료, 외부 무료·내부 유료)가 언급된 경우:",
@@ -1141,6 +1163,101 @@ def _estimate_total_krw(day_plans: dict) -> int:
     return total
 
 
+_TIME_RANGE_RE = re.compile(r"^\s*(\d{2}):(\d{2})\s*~\s*(\d{2}):(\d{2})\s*$")
+
+
+def _parse_time_range(value: str) -> tuple[int, int] | None:
+    match = _TIME_RANGE_RE.match(value or "")
+    if not match:
+        return None
+    sh, sm, eh, em = (int(part) for part in match.groups())
+    if sh > 23 or eh > 23 or sm > 59 or em > 59:
+        return None
+    return sh * 60 + sm, eh * 60 + em
+
+
+def _format_minutes(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _copy_item_with(item: Any, **updates: Any) -> Any:
+    if hasattr(item, "model_copy"):
+        return item.model_copy(update=updates)
+    copied = dict(item)
+    copied.update(updates)
+    return copied
+
+
+def _normalize_overnight_day_plans(day_plans: dict[str, list]) -> dict[str, list]:
+    """
+    프론트/API contract가 date bucket + "HH:MM ~ HH:MM" 문자열이므로,
+    자정을 넘는 항목은 저장 가능한 두 항목으로 분할한다.
+
+    원본 ID가 없는 현재 구조에서는 두 번째 조각에 비용을 붙이면 합산이 중복되므로
+    비용은 첫 번째 조각에만 남긴다.
+    """
+    normalized: dict[str, list] = {date_key: [] for date_key in sorted(day_plans.keys())}
+
+    for date_key in sorted(day_plans.keys()):
+        source_items = day_plans.get(date_key, [])
+        parsed_ranges = []
+        overnight_ends = []
+        has_late_night_item = False
+        for item in source_items:
+            time_value = item.time if hasattr(item, "time") else item.get("time", "")
+            parsed = _parse_time_range(time_value)
+            parsed_ranges.append(parsed)
+            if parsed:
+                start, end = parsed
+                if start >= 18 * 60:
+                    has_late_night_item = True
+                if start >= 18 * 60 and end <= start:
+                    overnight_ends.append(end)
+
+        next_date = str(date.fromisoformat(date_key) + timedelta(days=1))
+        early_next_day_items: list[Any] = []
+        early_cutoff = max([4 * 60, *[end + 120 for end in overnight_ends]]) if overnight_ends else 0
+
+        for idx, item in enumerate(source_items):
+            parsed = parsed_ranges[idx]
+            if not parsed:
+                normalized.setdefault(date_key, []).append(item)
+                continue
+
+            start, end = parsed
+            name = item.plan_name if hasattr(item, "plan_name") else item.get("plan_name", "")
+            note = item.note if hasattr(item, "note") else item.get("note", "")
+            text = f"{name} {note}"
+            is_rest_continuation = any(token in text for token in ("휴식", "취침", "숙소 귀환", "호텔 귀환"))
+            if (
+                overnight_ends
+                and start <= early_cutoff
+                and (end <= max(early_cutoff, start) or is_rest_continuation)
+            ):
+                early_next_day_items.append(item)
+                continue
+
+            if has_late_night_item and start < 4 * 60 and is_rest_continuation:
+                early_next_day_items.append(item)
+                continue
+
+            if end > start:
+                normalized.setdefault(date_key, []).append(item)
+                continue
+
+            normalized.setdefault(date_key, []).append(
+                _copy_item_with(item, time=f"{_format_minutes(start)} ~ 23:59")
+            )
+            normalized.setdefault(next_date, []).append(
+                _copy_item_with(item, time=f"00:00 ~ {_format_minutes(end)}", cost=None)
+            )
+
+        if early_next_day_items:
+            normalized.setdefault(next_date, []).extend(early_next_day_items)
+
+    return {date_key: items for date_key, items in sorted(normalized.items())}
+
+
 async def run_itinerary_pipeline(
     deps,           # OrchestratorDeps
     user_message: str,
@@ -1302,6 +1419,11 @@ async def run_itinerary_pipeline(
                 prev_msg = msg
 
         result = await stream.get_output()
+
+    if result.day_plans:
+        result = result.model_copy(update={
+            "day_plans": _normalize_overnight_day_plans(result.day_plans)
+        })
 
     # ── 예산 초과 확인 — cost 합산 후 초과 시 업데이트 제안 ─────────────
     if budget and result.day_plans:
