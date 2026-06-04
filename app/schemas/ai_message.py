@@ -30,6 +30,11 @@ class DayPlanItem(BaseModel):
     note: str = ""
     cost: ItemCost | None = None  # 전체 금액 (항공: 탑승객 전원, 숙소: 전체 숙박, 식사/교통: 전체 인원). 무료이면 null
 
+    @field_validator("note", mode="before")
+    @classmethod
+    def _coerce_note(cls, v: Any) -> str:
+        return v if v is not None else ""
+
 
 class ResponseClassification(BaseModel):
     type: Literal["chat", "itinerary", "change", "reservation", "cancel"]
