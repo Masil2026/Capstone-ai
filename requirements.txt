@@ -13,6 +13,7 @@ openai>=1.0.0
 # --- Database & Cache ---
 sqlalchemy==2.0.32
 psycopg[binary,pool]==3.2.3
+psycopg2-binary
 redis==5.0.8
 
 # --- Testing ---

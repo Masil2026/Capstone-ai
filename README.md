@@ -48,6 +48,8 @@
 ```powershell
 # 1. 가상환경 생성 (최초 1회)
 python -m venv venv
+or
+py -m venv venv
 
 # 2. 가상환경 활성화 (Windows)
 .\venv\Scripts\activate
