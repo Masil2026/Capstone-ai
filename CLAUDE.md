@@ -10,7 +10,7 @@
 |------|------|------|
 | 웹 프레임워크 | FastAPI + uvicorn | 비동기 지원, 자동 Swagger |
 | AI 에이전트 | **pydantic-ai** | LangChain 대신 타입 안전성 확보 |
-| LLM | GPT-4.1 (오케스트레이터·최종 응답) + GPT-4o-mini (비정형 전처리·타입 판별) | 역할별 모델 분리; env `LLM_PROVIDER=openai`, `ORCHESTRATOR_MODEL`, `PREPROCESSOR_MODEL`로 변경 |
+| LLM | Gemini 3.5 Flash (비정형 전처리·타입 판별) + Gemini 3.1 Pro Preview (오케스트레이터·최종 응답) | 역할별 모델 분리; Vertex AI ADC 인증; env `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_REGION`, `PREPROCESSOR_MODEL`, `ORCHESTRATOR_MODEL`으로 설정 |
 | DB | SQLAlchemy (동기) → Supabase PostgreSQL | read-only, MCP로 조회 가능 |
 | 캐시 | Upstash Redis (`redis.asyncio`) | 대화 세션 저장 |
 | 인증 | Clerk JWT (`python-jose`) | `Depends(get_current_user)` |
