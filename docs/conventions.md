@@ -250,7 +250,7 @@ tests/
 |------|------|
 | 외부 API 비용이 낮음 (Duffel, Tavily, Open-Meteo) | 실제 API 호출 통합 테스트 |
 | 외부 API 비용이 높거나 키 없이도 로직 검증 가능 | `unittest.mock.patch`로 httpx 모킹 |
-| DB 연결 확인 | `SessionLocal` 직접 생성, fixture 없음 |
+| DB 연결 확인 | `AsyncSessionLocal` 직접 생성, `@pytest.mark.asyncio`, fixture 없음 |
 
 ### 통합 테스트 템플릿
 

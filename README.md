@@ -20,8 +20,8 @@
 * **Observability:** **LangSmith** (LLM 추론 과정 추적 및 레이턴시 모니터링)
 
 ### **Database & Infrastructure**
-* **Database:** PostgreSQL (Supabase) - 사용자 정보 및 일정 저장
-* **Cache/Memory:** Redis (Upstash) - 대화 맥락(Conversation Summary) 관리
+* **Database:** PostgreSQL (Docker) - 사용자 정보 및 일정 저장 / asyncpg + SQLAlchemy async
+* **Cache/Memory:** Redis (Docker) - 대화 맥락(Conversation Summary) 관리
 
 ---
 
@@ -105,11 +105,14 @@ docker run -p 8000:8000 --env-file .env capstone-ai
 
 | 변수 | 설명 |
 |------|------|
-| `GOOGLE_API_KEY` | Gemini API 키 |
-| `LANGCHAIN_API_KEY` | LangSmith API 키 |
-| `LANGCHAIN_TRACING_V2` | LangSmith 추적 활성화 (`true`) |
-| `SUPABASE_URL` | Supabase 프로젝트 URL |
-| `SUPABASE_KEY` | Supabase API 키 |
-| `REDIS_URL` | Upstash Redis 접속 URL |
+| `GPT_API_KEY` | OpenAI API 키 |
+| `GOOGLE_API_KEY` | Gemini API 키 (LLM_PROVIDER=gemini 시) |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | Docker PostgreSQL 접속 정보 |
+| `REDIS_HOST` / `REDIS_PORT` | Docker Redis 접속 정보 |
+| `DUFFEL_API_KEY` | Duffel 항공/숙소 API 키 |
+| `TAVILY_API_KEY` | Tavily 검색 API 키 |
+| `GOOGLE_MAPS_API_KEY` | Google Maps API 키 |
+| `CLERK_ISSUER` / `CLERK_JWKS_URL` | Clerk JWT 인증 정보 |
+| `INTERNAL_TOKEN` | Spring Boot ↔ FastAPI 내부 인증 토큰 |
 =======
 
