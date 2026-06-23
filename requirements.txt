@@ -12,8 +12,9 @@ openai>=1.0.0
 
 # --- Database & Cache ---
 sqlalchemy==2.0.32
-psycopg[binary,pool]==3.2.3
-psycopg2-binary
+asyncpg==0.30.0
+# psycopg[binary,pool]==3.2.3  # 동기 드라이버 — asyncpg 전환 후 미사용
+# psycopg2-binary               # 동기 드라이버 — asyncpg 전환 후 미사용
 redis==5.0.8
 
 # --- Testing ---
