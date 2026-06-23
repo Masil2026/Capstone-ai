@@ -9,7 +9,8 @@ from typing import Any
 
 import json as _json
 
-from openai import AsyncOpenAI
+import vertexai
+from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 from sqlalchemy import text
 
@@ -17,8 +18,8 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from .memory import save_memory, save_raw_history, save_pg_history
 
-_openai_client = AsyncOpenAI(api_key=settings.GPT_API_KEY)
-_EMBEDDING_MODEL = "text-embedding-3-small"
+vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_REGION)
+_EMBEDDING_MODEL = "text-embedding-004"
 _log = logging.getLogger(__name__)
 
 
@@ -27,12 +28,11 @@ _log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 async def get_user_embedding(text_input: str) -> list[float]:
-    """OpenAI text-embedding-3-small으로 임베딩 생성 (dim=1536)"""
-    response = await _openai_client.embeddings.create(
-        model=_EMBEDDING_MODEL,
-        input=text_input,
-    )
-    return response.data[0].embedding
+    """Vertex AI text-embedding-004로 임베딩 생성 (dim=768)"""
+    model = TextEmbeddingModel.from_pretrained(_EMBEDDING_MODEL)
+    inputs = [TextEmbeddingInput(text_input, task_type="RETRIEVAL_QUERY")]
+    embeddings = await asyncio.to_thread(model.get_embeddings, inputs)
+    return embeddings[0].values
 
 
 # ---------------------------------------------------------------------------
