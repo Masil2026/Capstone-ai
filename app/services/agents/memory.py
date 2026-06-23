@@ -11,8 +11,6 @@ from app.core.config import settings
 _redis = aioredis.Redis(
     host=settings.REDIS_HOST,
     port=settings.REDIS_PORT,
-    password=settings.REDIS_PASSWORD,
-    ssl=True,
     decode_responses=False,
 )
 

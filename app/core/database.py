@@ -11,7 +11,6 @@ connection_url = URL.create(
     host=settings.DB_HOST,
     port=settings.DB_PORT,
     database=settings.DB_NAME,
-    query={"sslmode": "require"}
 )
 
 # 1. 동기 DB 엔진 생성
@@ -19,9 +18,6 @@ engine = create_engine(
     connection_url,
     echo=True,
     poolclass=NullPool,
-    connect_args={
-        "options": "-c search_path=public" 
-    }
 )
 
 # 2. 동기 세션 생성기

@@ -21,9 +21,9 @@ class Settings(BaseSettings):
     DB_NAME: str
     
     REDIS_HOST: str
-    REDIS_PASSWORD: str
     REDIS_PORT: int
-    REDIS_URL: str
+    REDIS_PASSWORD: Optional[str] = None  # Upstash 전용 — Docker Redis는 미사용
+    REDIS_URL: Optional[str] = None       # Upstash 전용 — Docker Redis는 미사용
 
     # --- Server Settings ---
     PORT: int
