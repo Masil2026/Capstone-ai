@@ -1,6 +1,12 @@
+from datetime import date, timedelta
+
 import pytest
 from app.services.adapters.accommodation_api import AccommodationAdapter
 from app.services.travel_agent_service import TravelAgentService
+
+
+def _future_date(days: int) -> str:
+    return (date.today() + timedelta(days=days)).isoformat()
 
 def _print_hotel_results(test_name, result):
     print("\n" + "="*65)
@@ -43,11 +49,10 @@ async def test_hotel_search_with_child():
     adapter = AccommodationAdapter()
     service = TravelAgentService({"duffel_accommodation": adapter})
 
-    # 도쿄 지역, 6월 15일~18일 (3박)
     params = {
         "city_name": "Seoul",
-        "check_in": "2026-06-15",
-        "check_out": "2026-06-18",
+        "check_in": _future_date(30),
+        "check_out": _future_date(33),
         "rooms": 1,
         "adults": 2,
         "children": 1,
@@ -79,8 +84,8 @@ async def test_hotel_validation_error():
     # 아이는 1명인데 나이 정보를 안 보냈을 때
     invalid_params = {
         "city_name": "Tokyo",
-        "check_in": "2026-06-15",
-        "check_out": "2026-06-18",
+        "check_in": _future_date(30),
+        "check_out": _future_date(33),
         "children": children_count,
         "child_ages": child_ages_list
     }
@@ -98,11 +103,10 @@ async def test_hotel_search_by_city_name():
     adapter = AccommodationAdapter()
     service = TravelAgentService({"duffel_accommodation": adapter})
 
-    # 오사카 지역, 2026년 7월 1일~4일 (3박)
     params = {
         "city_name": "osaka",
-        "check_in": "2026-07-01",
-        "check_out": "2026-07-04",
+        "check_in": _future_date(30),
+        "check_out": _future_date(33),
         "rooms": 1,
         "adults": 1
     }
