@@ -4,14 +4,14 @@ from typing import Optional
 
 class Settings(BaseSettings):
     # --- LLM Provider ---
-    # "openai" | "gemini" 중 하나. .env에서만 변경한다.
-    LLM_PROVIDER: str = "openai"
-    # None이면 provider 기본값 사용 (openai: gpt-4o / gpt-4o-mini, gemini: gemini-2.5-pro / gemini-2.0-flash)
+    # "vertexai" 고정. .env에서만 변경한다.
+    LLM_PROVIDER: str = "vertexai"
+    # None이면 provider 기본값 사용 (vertexai: gemini-3.1-pro-preview / gemini-3.5-flash)
     ORCHESTRATOR_MODEL: Optional[str] = None
     PREPROCESSOR_MODEL: Optional[str] = None
 
-    GPT_API_KEY: Optional[str] = None      # LLM_PROVIDER="openai" 일 때 필요
-    GOOGLE_API_KEY: Optional[str] = None   # LLM_PROVIDER="gemini" 일 때 필요
+    GOOGLE_CLOUD_PROJECT: Optional[str] = None   # Vertex AI 프로젝트 ID
+    GOOGLE_CLOUD_REGION: str = "us-central1"     # Vertex AI 리전 (배포 시 .env에서 지정)
 
     # --- Database & Redis ---
     DB_USER: str
@@ -44,9 +44,6 @@ class Settings(BaseSettings):
 
     # --- Internal Token (Spring Boot ↔ FastAPI 서버 간 인증) ---
     INTERNAL_TOKEN: str
-
-    # --- OpenAI Embeddings ---
-    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
     model_config = SettingsConfigDict(
         env_file=".env",
