@@ -39,7 +39,7 @@ async def test_flight_search_with_child():
 
     params = {
         "origin": "london", "destination": "zurich",
-        "departure_date": "2026-12-24",
+        "departure_date": _future_departure_date(30),
         "adults": 2, "children": 1, "child_ages": [7]
     }
 
@@ -87,7 +87,7 @@ async def test_flight_validation_error():
     invalid_params = {
         "origin": "seoul",
         "destination": "tokyo",
-        "departure_date": "2026-06-15",
+        "departure_date": _future_departure_date(30),
         "children": children_count,
         "child_ages": child_ages_list
     }
@@ -109,7 +109,7 @@ async def test_flight_search_with_city_names():
     params = {
         "origin": "seoul",
         "destination": "osaka",
-        "departure_date": "2026-06-25",
+        "departure_date": _future_departure_date(30),
         "adults": 1
     }
 
