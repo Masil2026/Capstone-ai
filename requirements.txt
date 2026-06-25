@@ -12,6 +12,7 @@ openai>=1.0.0
 
 # --- Database & Cache ---
 sqlalchemy==2.0.32
+greenlet==3.5.2  # SQLAlchemy async(create_async_engine) 필수 — 일부 환경에선 자동설치 안 됨
 asyncpg==0.30.0
 # psycopg[binary,pool]==3.2.3  # 동기 드라이버 — asyncpg 전환 후 미사용
 # psycopg2-binary               # 동기 드라이버 — asyncpg 전환 후 미사용
