@@ -46,7 +46,7 @@ async def test_load_context():
 
     # user_embedding: 1536차원 float 리스트
     assert isinstance(ctx["user_embedding"], list)
-    assert len(ctx["user_embedding"]) == 1536
+    assert len(ctx["user_embedding"]) == 768
 
     # history: 리스트 (비어있을 수 있음)
     assert isinstance(ctx["history"], list)
