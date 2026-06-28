@@ -13,12 +13,19 @@ import vertexai
 from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 from sqlalchemy import text
+from google.oauth2 import service_account
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from .memory import save_memory, save_raw_history, save_pg_history
 
-vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_EMBEDDING_REGION)
+_creds = None
+if settings.GOOGLE_APPLICATION_CREDENTIALS:
+    _creds = service_account.Credentials.from_service_account_file(
+        settings.GOOGLE_APPLICATION_CREDENTIALS,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_EMBEDDING_REGION, credentials=_creds)
 _EMBEDDING_MODEL = "text-embedding-004"
 _log = logging.getLogger(__name__)
 

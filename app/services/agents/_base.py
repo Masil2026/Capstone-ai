@@ -22,11 +22,20 @@ def _build_model(role: str):
 
     from pydantic_ai.models.google import GoogleModel
     from pydantic_ai.providers.google import GoogleProvider
+    from google.oauth2 import service_account
+
+    creds = None
+    if settings.GOOGLE_APPLICATION_CREDENTIALS:
+        creds = service_account.Credentials.from_service_account_file(
+            settings.GOOGLE_APPLICATION_CREDENTIALS,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
     return GoogleModel(
         model_name,
         provider=GoogleProvider(
             project=settings.GOOGLE_CLOUD_PROJECT,
             location=settings.GOOGLE_CLOUD_REGION,
+            credentials=creds,
         ),
     )
 
