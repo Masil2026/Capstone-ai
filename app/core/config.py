@@ -56,7 +56,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=True
+        case_sensitive=True,
+        extra="ignore",
     )
 
 # 싱글톤 패턴: 캐시를 사용하여 설정을 한 번만 로드함
