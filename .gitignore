@@ -12,6 +12,9 @@ __pycache__/
 # 기타
 .vscode/
 
+# macOS Finder 생성 파일
+.DS_Store
+
 # Claude / AI Assistant 관련
 .claude/settings.local.json
 .claude.json

@@ -43,28 +43,43 @@
 프로젝트를 로컬 환경에서 실행하고 API 문서를 확인하는 단계별 안내입니다.
 
 ### **1. 가상환경 설정 및 패키지 설치**
-프로젝트 루트 폴더에서 아래 명령어를 순서대로 입력하세요.
+프로젝트 루트 폴더에서 OS에 맞는 명령어를 순서대로 입력하세요.
 
+**Windows (PowerShell)**
 ```powershell
 # 1. 가상환경 생성 (최초 1회)
-python -m venv venv
-or
-py -m venv venv
+python -m venv venv   # 또는: py -m venv venv
 
-# 2. 가상환경 활성화 (Windows)
+# 2. 가상환경 활성화
 .\venv\Scripts\activate
 
 # 3. 필수 라이브러리 설치
 pip install -r requirements.txt
 ```
 
+**macOS / Linux (bash·zsh)**
+```bash
+# 1. 가상환경 생성 (최초 1회)
+python3 -m venv venv
+
+# 2. 가상환경 활성화 (Windows와 경로가 다름)
+source venv/bin/activate
+
+# 3. 필수 라이브러리 설치
+pip install -r requirements.txt
+```
+
+> 💡 **macOS 참고**
+> - `python`/`pip` 대신 **`python3`/`pip3`** 를 써야 할 수 있습니다 (Homebrew 파이썬 기준).
+> - 가상환경 활성화 경로가 Windows와 다름(`source venv/bin/activate`), 비활성화는 `deactivate`.
+
 ### **2. 환경 변수 설정 (.env)**
 프로젝트 루트 디렉토리에 `.env` 파일을 생성하고, 발급받은 API 키들을 입력합니다. (키 유출 주의)
 
 ### **3. API 서버 실행**
-`main.py`가 최상단 디렉토리에 위치하므로 아래 명령어로 실행합니다.
+`main.py`가 최상단 디렉토리에 위치하므로 아래 명령어로 실행합니다. (Windows·macOS 공통)
 
-```powershell
+```bash
 uvicorn main:app --reload --port 8000
 ```
 
@@ -113,6 +128,7 @@ docker run -p 8000:8000 --env-file .env capstone-ai
 | `TAVILY_API_KEY` | Tavily 검색 API 키 |
 | `GOOGLE_MAPS_API_KEY` | Google Maps API 키 |
 | `CLERK_ISSUER` / `CLERK_JWKS_URL` | Clerk JWT 인증 정보 |
+| `KOREA_TOURISM_API_KEY` | 한국관광공사 TourAPI 키 (data.go.kr, Decoding 키) |
+| `BOOKING_API_KEY` | Booking.com RapidAPI(booking-com15) 키 |
 | `INTERNAL_TOKEN` | Spring Boot ↔ FastAPI 내부 인증 토큰 |
-=======
 

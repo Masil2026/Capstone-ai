@@ -43,7 +43,8 @@ tests/
   db/                            # DB / Redis 연결 테스트
   tools/                         # 어댑터 통합 & Mock 테스트
 docs/
-  api/                           # 엔드포인트별 API 명세 (new-endpoint 스킬이 자동 생성)
+  api/                           # 백엔드 API 명세 (new-endpoint 스킬이 자동 생성)
+  external-api/                  # 외부 서드파티 API 레퍼런스 (어댑터 구현용 노트)
   conventions.md                 # 코딩 패턴 상세 — 코드 작성 전 반드시 확인
   aiagentflow.md                 # AI 에이전트 전체 흐름 — 에이전트 관련 작업 시 확인
 ```
@@ -61,6 +62,7 @@ docs/
 3. 반환값은 항상 `{"status": "success"|"error", ...}` — 예외 raise 금지
 4. 외부 HTTP 호출은 `httpx.AsyncClient`에 timeout 명시 필수
 5. 패턴은 @docs/conventions.md 참고
+6. 대상 외부 API 레퍼런스는 `docs/external-api/{서비스명}_api_reference.md`에 작성/참고 (백엔드 명세인 `docs/api/`와 구분)
 
 ### 설정값 사용 시
 `settings.변수명` 형태로만 읽는다. `.env`를 직접 읽거나 `os.getenv`를 쓰지 않는다.
