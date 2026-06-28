@@ -9,6 +9,11 @@ __pycache__/
 # 환경변수
 .env
 
+# GCP 서비스 계정 키 (절대 커밋 금지)
+*.json
+!package.json
+!package-lock.json
+
 # 기타
 .vscode/
 
