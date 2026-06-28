@@ -34,7 +34,7 @@ async def _run_agent(deps: OrchestratorDeps, user_message: str):
         )
     except ModelHTTPError as e:
         if e.status_code == 429:
-            pytest.skip(f"GPT-4.1 rate limit (429) — 잠시 후 재실행: {e}")
+            pytest.skip(f"Gemini rate limit (429) — 잠시 후 재실행: {e}")
         raise
 
 # ── 기존 컨텍스트 픽스처 ─────────────────────────────────────────────────────
