@@ -7,7 +7,7 @@ python-dotenv==1.0.1
 pydantic-settings==2.5.2
 
 # --- AI & LLM ---
-pydantic-ai-slim[vertexai]==1.93.0
+pydantic-ai-slim[google]==1.93.0
 google-cloud-aiplatform
 
 # --- Database & Cache ---

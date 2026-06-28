@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     PREPROCESSOR_MODEL: Optional[str] = None
 
     GOOGLE_CLOUD_PROJECT: Optional[str] = None   # Vertex AI 프로젝트 ID
-    GOOGLE_CLOUD_REGION: str = "us-central1"     # Vertex AI 리전 (배포 시 .env에서 지정)
+    GOOGLE_CLOUD_REGION: str = "global"          # LLM 리전 (gemini-3.1-pro-preview는 global 필요)
+    GOOGLE_CLOUD_EMBEDDING_REGION: str = "us-central1"  # 임베딩 리전 (text-embedding-004는 regional 필요)
 
     # --- Database & Redis ---
     DB_USER: str
