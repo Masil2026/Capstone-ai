@@ -20,13 +20,13 @@ def _build_model(role: str):
     else:
         raise ValueError(f"알 수 없는 role: {role!r}")
 
-    from pydantic_ai.models.vertexai import VertexAIModel
-    from pydantic_ai.providers.google_vertex import GoogleVertexProvider
-    return VertexAIModel(
+    from pydantic_ai.models.google import GoogleModel
+    from pydantic_ai.providers.google import GoogleProvider
+    return GoogleModel(
         model_name,
-        provider=GoogleVertexProvider(
-            project_id=settings.GOOGLE_CLOUD_PROJECT,
-            region=settings.GOOGLE_CLOUD_REGION,
+        provider=GoogleProvider(
+            project=settings.GOOGLE_CLOUD_PROJECT,
+            location=settings.GOOGLE_CLOUD_REGION,
         ),
     )
 
