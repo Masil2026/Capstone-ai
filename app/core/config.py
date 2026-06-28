@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 from typing import Optional
+import os
 
 class Settings(BaseSettings):
     # --- LLM Provider ---
@@ -10,9 +11,10 @@ class Settings(BaseSettings):
     ORCHESTRATOR_MODEL: Optional[str] = None
     PREPROCESSOR_MODEL: Optional[str] = None
 
-    GOOGLE_CLOUD_PROJECT: Optional[str] = None   # Vertex AI 프로젝트 ID
-    GOOGLE_CLOUD_REGION: str = "global"          # LLM 리전 (gemini-3.1-pro-preview는 global 필요)
-    GOOGLE_CLOUD_EMBEDDING_REGION: str = "us-central1"  # 임베딩 리전 (text-embedding-004는 regional 필요)
+    GOOGLE_CLOUD_PROJECT: Optional[str] = None
+    GOOGLE_CLOUD_REGION: str = "global"
+    GOOGLE_CLOUD_EMBEDDING_REGION: str = "us-central1"
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None  # GCP 서비스 계정 키 파일 경로
 
     # --- Database & Redis ---
     DB_USER: str
@@ -67,3 +69,7 @@ def get_settings():
 
 # 프로젝트 어디서든 import settings로 사용 가능
 settings = get_settings()
+
+# google-auth가 os.environ에서 직접 읽으므로 명시적으로 설정
+if settings.GOOGLE_APPLICATION_CREDENTIALS:
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.GOOGLE_APPLICATION_CREDENTIALS
