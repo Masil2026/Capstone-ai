@@ -15,7 +15,7 @@ from pydantic_ai.messages import ModelMessagesTypeAdapter
 from sqlalchemy import text
 
 from app.core.config import settings
-from app.core.database import SessionLocal
+from app.core.database import AsyncSessionLocal
 from .memory import save_memory, save_raw_history, save_pg_history
 
 vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_EMBEDDING_REGION)
@@ -36,25 +36,25 @@ async def get_user_embedding(text_input: str) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# DB 조회 (동기 — run_in_executor에서 실행)
+# DB 조회 (비동기)
 # ---------------------------------------------------------------------------
 
-def _query_recent_history(room_id: str) -> tuple[list, list[dict]]:
+async def _query_recent_history(room_id: str) -> tuple[list, list[dict]]:
     """chat_messages에서 최근 20개 조회 → (ModelMessage 리스트, raw dict 리스트) 반환"""
-    with SessionLocal() as db:
-        rows = db.execute(
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
             text(
                 "SELECT role, content, created_at FROM chat_messages "
                 "WHERE room_id = :room_id "
                 "ORDER BY created_at DESC LIMIT 20"
             ),
             {"room_id": room_id},
-        ).fetchall()
-        rows = list(rows)  # Row 데이터를 세션 종료 전에 Python 객체로 완전히 복사
+        )
+        rows = result.fetchall()
 
     raw_simple: list[dict] = []
     raw = []
-    for row in reversed(rows):  # 오래된 순으로
+    for row in reversed(rows):
         ts = row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at)
         raw_simple.append({"role": row.role, "content": row.content})
         if row.role == "user":
@@ -77,10 +77,10 @@ def _query_recent_history(room_id: str) -> tuple[list, list[dict]]:
         return [], raw_simple
 
 
-def _query_similar_messages(room_id: str, embedding: list[float]) -> list[dict]:
+async def _query_similar_messages(room_id: str, embedding: list[float]) -> list[dict]:
     """pgvector 코사인 유사도 기준 상위 5개 과거 메시지 조회"""
-    with SessionLocal() as db:
-        rows = db.execute(
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
             text(
                 "SELECT role, content "
                 "FROM chat_messages "
@@ -89,17 +89,19 @@ def _query_similar_messages(room_id: str, embedding: list[float]) -> list[dict]:
                 "LIMIT 5"
             ),
             {"room_id": room_id, "emb": str(embedding)},
-        ).fetchall()
+        )
+        rows = result.fetchall()
         return [{"role": r.role, "content": r.content} for r in rows]
 
 
-def _query_chat_room_memory(room_id: str) -> dict:
+async def _query_chat_room_memory(room_id: str) -> dict:
     """chat_rooms 테이블에서 ai_summary, preferences 조회"""
-    with SessionLocal() as db:
-        row = db.execute(
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
             text("SELECT ai_summary, preferences FROM chat_rooms WHERE id = :room_id"),
             {"room_id": room_id},
-        ).fetchone()
+        )
+        row = result.fetchone()
         if row is None:
             return {"ai_summary": None, "preferences": None}
         preferences = row.preferences
@@ -114,13 +116,13 @@ def _to_date_str(value) -> str:
         return value.date().isoformat()
     if isinstance(value, date):
         return value.isoformat()
-    return str(value)[:10]  # "2026-04-30T15:00:00+00:00" → "2026-04-30"
+    return str(value)[:10]
 
 
-def _query_reservations(room_id: str) -> list[dict]:
+async def _query_reservations(room_id: str) -> list[dict]:
     """채팅방의 활성 예약 목록을 조회한다 (취소되지 않은 것만)."""
-    with SessionLocal() as db:
-        rows = db.execute(
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
             text(
                 "SELECT r.id, r.type, r.status, r.external_ref_id, r.detail, "
                 "r.total_price, r.currency, r.reserved_at "
@@ -130,13 +132,14 @@ def _query_reservations(room_id: str) -> list[dict]:
                 "ORDER BY r.created_at DESC"
             ),
             {"room_id": room_id},
-        ).fetchall()
-        result = []
+        )
+        rows = result.fetchall()
+        result_list = []
         for row in rows:
             detail = row.detail
             if isinstance(detail, str):
                 detail = json.loads(detail)
-            result.append({
+            result_list.append({
                 "id": str(row.id),
                 "type": row.type,
                 "status": row.status,
@@ -146,13 +149,13 @@ def _query_reservations(room_id: str) -> list[dict]:
                 "currency": row.currency,
                 "reserved_at": row.reserved_at.isoformat() if row.reserved_at else None,
             })
-        return result
+        return result_list
 
 
-def _query_current_itinerary(room_id: str) -> dict | None:
+async def _query_current_itinerary(room_id: str) -> dict | None:
     """roomId로 현재 여행 일정 전체 조회"""
-    with SessionLocal() as db:
-        row = db.execute(
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
             text(
                 "SELECT destinations, start_date, end_date, total_days, "
                 "budget, adult_count, child_count, child_ages, day_plans "
@@ -161,7 +164,8 @@ def _query_current_itinerary(room_id: str) -> dict | None:
                 "ORDER BY created_at DESC LIMIT 1"
             ),
             {"room_id": room_id},
-        ).fetchone()
+        )
+        row = result.fetchone()
 
         if row is None:
             return None
@@ -210,54 +214,43 @@ async def load_context(room_id: str, user_message: str) -> dict[str, Any]:
         similar_messages  : pgvector 유사 메시지 최대 5개 [{"role", "content"}]
         current_itinerary : 현재 여행 일정 전체 (없으면 None)
     """
-    loop = asyncio.get_running_loop()
-
-    # 임베딩과 DB 조회 병렬 실행 — ai_summary/preferences는 매 요청 DB에서 직접 조회
-    user_embedding_fut = get_user_embedding(user_message)
-    db_memory_fut = loop.run_in_executor(None, _query_chat_room_memory, room_id)
-
+    # 임베딩 + 장기 메모리 병렬 조회
     try:
-        user_embedding, db_memory = await asyncio.gather(user_embedding_fut, db_memory_fut)
+        user_embedding, db_memory = await asyncio.gather(
+            get_user_embedding(user_message),
+            _query_chat_room_memory(room_id),
+        )
     except Exception:
-        user_embedding = await user_embedding_fut
+        user_embedding = await get_user_embedding(user_message)
         db_memory = {"ai_summary": None, "preferences": None}
 
-    # DB 값으로 Redis 동기화 — Java 백엔드가 DB에 썼을 수 있으므로 매 요청마다 갱신 (fire-and-forget)
+    # Java 백엔드가 DB에 썼을 수 있으므로 매 요청마다 Redis 갱신 (fire-and-forget)
     asyncio.ensure_future(save_memory(room_id, db_memory["ai_summary"], db_memory["preferences"]))
 
-    # pgvector 검색 · itinerary 조회 · 예약 목록 조회 · 대화 히스토리 병렬 실행
-    similar_fut = loop.run_in_executor(None, _query_similar_messages, room_id, user_embedding)
-    itinerary_fut = loop.run_in_executor(None, _query_current_itinerary, room_id)
-    reservations_fut = loop.run_in_executor(None, _query_reservations, room_id)
-    history_fut = loop.run_in_executor(None, _query_recent_history, room_id)
+    # 나머지 4개 쿼리 병렬 실행 — 개별 실패가 전체를 막지 않도록 return_exceptions 사용
+    raw = await asyncio.gather(
+        _query_similar_messages(room_id, user_embedding),
+        _query_current_itinerary(room_id),
+        _query_reservations(room_id),
+        _query_recent_history(room_id),
+        return_exceptions=True,
+    )
 
-    try:
-        similar_messages = await similar_fut
-    except Exception:
-        similar_messages = []
+    similar_messages  = raw[0] if not isinstance(raw[0], BaseException) else []
+    current_itinerary = raw[1] if not isinstance(raw[1], BaseException) else None
+    reservations      = raw[2] if not isinstance(raw[2], BaseException) else []
+    history_tuple     = raw[3] if not isinstance(raw[3], BaseException) else ([], [])
+
+    if isinstance(raw[1], BaseException):
+        _log.error("current_itinerary 로드 실패", exc_info=raw[1])
+    if isinstance(raw[2], BaseException):
+        _log.error("reservations 로드 실패", exc_info=raw[2])
+    if isinstance(raw[3], BaseException):
+        _log.error("history 로드 실패", exc_info=raw[3])
+
+    history, raw_history = history_tuple
 
     asyncio.ensure_future(save_pg_history(room_id, similar_messages))
-
-    try:
-        current_itinerary = await itinerary_fut
-    except Exception:
-        _log.error("current_itinerary 로드 실패", exc_info=True)
-        current_itinerary = None
-
-    try:
-        reservations = await reservations_fut
-    except Exception:
-        _log.error("reservations 로드 실패", exc_info=True)
-        reservations = []
-
-    try:
-        history, raw_history = await history_fut
-    except Exception:
-        _log.error("history 로드 실패", exc_info=True)
-        history = []
-        raw_history = []
-
-    # DB에서 읽은 히스토리를 Redis에 저장 (비동기 fire-and-forget)
     asyncio.ensure_future(save_raw_history(room_id, raw_history))
 
     print(

@@ -20,11 +20,11 @@ class Settings(BaseSettings):
     DB_HOST: str
     DB_PORT: int  # 포트는 숫자이므로 int로 설정
     DB_NAME: str
-    
+
     REDIS_HOST: str
-    REDIS_PASSWORD: str
     REDIS_PORT: int
-    REDIS_URL: str
+    REDIS_PASSWORD: Optional[str] = None  # Upstash 전용 — Docker Redis는 미사용
+    REDIS_URL: Optional[str] = None       # Upstash 전용 — Docker Redis는 미사용
 
     # --- Server Settings ---
     PORT: int
@@ -38,7 +38,14 @@ class Settings(BaseSettings):
 
     # --- Google Maps API ---
     GOOGLE_MAPS_API_KEY: str
-    
+
+    # --- 한국관광공사 TourAPI (data.go.kr) ---
+    # 공공데이터포털에서 발급받은 "Decoding" 키 사용 (httpx가 자동 URL 인코딩 → 인코딩 키 쓰면 이중 인코딩됨)
+    KOREA_TOURISM_API_KEY: Optional[str] = None
+
+    # --- Booking.com (RapidAPI booking-com15) ---
+    BOOKING_API_KEY: Optional[str] = None
+
     # CLERK KEY
     CLERK_ISSUER: str
     CLERK_JWKS_URL: str
