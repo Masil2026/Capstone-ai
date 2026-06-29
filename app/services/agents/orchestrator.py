@@ -14,7 +14,7 @@ from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
 from app.services.travel_agent_service import TravelAgentService
-from ._base import _build_model, preprocessor_agent
+from ._base import _build_model, preprocessor_agent, run_with_retry
 
 # ---------------------------------------------------------------------------
 # OrchestratorDeps — 매 요청마다 시스템 프롬프트에 주입되는 컨텍스트
@@ -359,8 +359,10 @@ async def search_web(
     snippets = "\n\n".join(
         f"[{r['title']}]\n{r['content']}" for r in filtered
     )
-    result = await preprocessor_agent.run(
-        f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.\n\n{snippets}"
+    result = await run_with_retry(
+        preprocessor_agent,
+        f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.\n\n{snippets}",
+        role="preprocessor",
     )
     return {"status": "success", "summary": result.output, "source_count": len(filtered)}
 
