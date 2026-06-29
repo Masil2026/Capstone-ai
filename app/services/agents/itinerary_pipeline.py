@@ -1195,6 +1195,9 @@ def _copy_item_with(item: Any, **updates: Any) -> Any:
     return copied
 
 
+_DATE_KEY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
 def _normalize_overnight_day_plans(day_plans: dict[str, list]) -> dict[str, list]:
     """
     프론트/API contract가 date bucket + "HH:MM ~ HH:MM" 문자열이므로,
@@ -1203,10 +1206,12 @@ def _normalize_overnight_day_plans(day_plans: dict[str, list]) -> dict[str, list
     원본 ID가 없는 현재 구조에서는 두 번째 조각에 비용을 붙이면 합산이 중복되므로
     비용은 첫 번째 조각에만 남긴다.
     """
-    normalized: dict[str, list] = {date_key: [] for date_key in sorted(day_plans.keys())}
+    # LLM이 잘못된 키(예: 'krw_2026_06_25')를 생성하는 경우 방어
+    valid_plans = {k: v for k, v in day_plans.items() if _DATE_KEY_RE.match(k)}
+    normalized: dict[str, list] = {date_key: [] for date_key in sorted(valid_plans.keys())}
 
-    for date_key in sorted(day_plans.keys()):
-        source_items = day_plans.get(date_key, [])
+    for date_key in sorted(valid_plans.keys()):
+        source_items = valid_plans.get(date_key, [])
         parsed_ranges = []
         overnight_ends = []
         has_late_night_item = False
