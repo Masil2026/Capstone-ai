@@ -25,6 +25,7 @@ _log = logging.getLogger(__name__)
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
+from app.core.config import settings
 from app.schemas.ai_message import OrchestratorResult
 from app.services.adapters.accommodation_api import AccommodationAdapter
 from app.services.adapters.flight_api import FlightAdapter
@@ -32,7 +33,7 @@ from app.services.adapters.google_maps import GoogleMapsAdapter
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.travel_agent_service import TravelAgentService
-from ._base import _build_model, preprocessor_agent
+from ._base import _build_model, preprocessor_agent, run_with_retry, _is_rate_limit_error, _retry_wait
 
 _service = TravelAgentService({
     "duffel_flight":        FlightAdapter(),
@@ -203,12 +204,14 @@ async def _extract_english_cities(cities: list[str]) -> list[str]:
 
     if korean_cities:
         city_list = "\n".join(f"{i+1}. {c}" for i, c in enumerate(korean_cities))
-        result = await preprocessor_agent.run(
+        result = await run_with_retry(
+            preprocessor_agent,
             "아래 도시명들을 영문으로만 답해줘. 번호 그대로 줄바꿈으로 구분하여 반환.\n"
             "영문 도시명 외 다른 텍스트는 출력하지 마.\n"
             "Island, City, Province 같은 지역 접미사 없이 도시명만 짧게 반환.\n"
             "예) '서울' → Seoul | '도쿄' → Tokyo | '제주도' → Jeju | '방콕' → Bangkok\n\n"
-            f"{city_list}"
+            f"{city_list}",
+            role="preprocessor",
         )
         translated = [
             line.strip().lstrip("0123456789. ")
@@ -843,11 +846,15 @@ async def _fetch_web_summary(city: str, preferences: dict | None) -> str:
     if not snippets:
         return f"{city} 여행 정보를 찾지 못했습니다."
     combined = "\n\n".join(snippets[:10])
+    if len(combined) <= settings.PREPROCESSOR_SKIP_MAX_LEN:
+        return combined
     pref_hint = ""
     if preferences:
         pref_hint = f"\n\n사용자 취향: {json.dumps(preferences, ensure_ascii=False)}\n위 취향을 참고하여 관련 정보를 일부 포함하되, 현지 대표 음식·명소 등 다양한 여행 정보의 균형을 유지해줘."
-    result = await preprocessor_agent.run(
-        f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.{pref_hint}\n\n{combined}"
+    result = await run_with_retry(
+        preprocessor_agent,
+        f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.{pref_hint}\n\n{combined}",
+        role="preprocessor",
     )
     return result.output
 
@@ -1188,6 +1195,9 @@ def _copy_item_with(item: Any, **updates: Any) -> Any:
     return copied
 
 
+_DATE_KEY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
 def _normalize_overnight_day_plans(day_plans: dict[str, list]) -> dict[str, list]:
     """
     프론트/API contract가 date bucket + "HH:MM ~ HH:MM" 문자열이므로,
@@ -1196,10 +1206,12 @@ def _normalize_overnight_day_plans(day_plans: dict[str, list]) -> dict[str, list
     원본 ID가 없는 현재 구조에서는 두 번째 조각에 비용을 붙이면 합산이 중복되므로
     비용은 첫 번째 조각에만 남긴다.
     """
-    normalized: dict[str, list] = {date_key: [] for date_key in sorted(day_plans.keys())}
+    # LLM이 잘못된 키(예: 'krw_2026_06_25')를 생성하는 경우 방어
+    valid_plans = {k: v for k, v in day_plans.items() if _DATE_KEY_RE.match(k)}
+    normalized: dict[str, list] = {date_key: [] for date_key in sorted(valid_plans.keys())}
 
-    for date_key in sorted(day_plans.keys()):
-        source_items = day_plans.get(date_key, [])
+    for date_key in sorted(valid_plans.keys()):
+        source_items = valid_plans.get(date_key, [])
         parsed_ranges = []
         overnight_ends = []
         has_late_night_item = False
@@ -1332,8 +1344,10 @@ async def run_itinerary_pipeline(
         replan_dates=replan_dates,
     )
     planner_context = _build_planner_prompt(planner_deps)
-    planner_result = await planner_agent.run(
+    planner_result = await run_with_retry(
+        planner_agent,
         f"{planner_context}\n\n---\n\n사용자 메시지: {user_message}",
+        role="planner",
         deps=planner_deps,
         message_history=history,
     )
@@ -1406,19 +1420,30 @@ async def run_itinerary_pipeline(
         replan_dates=replan_dates,
     )
     synth_context = _build_synthesizer_prompt(synth_deps)
-    async with synthesizer_agent.run_stream(
-        f"{synth_context}\n\n---\n\n사용자 메시지: {user_message}",
-        deps=synth_deps,
-        message_history=history,
-    ) as stream:
-        prev_msg = ""
-        async for partial in stream.stream_output():
-            msg = getattr(partial, "message", None) or ""
-            if len(msg) > len(prev_msg):
-                yield msg[len(prev_msg):]
-                prev_msg = msg
-
-        result = await stream.get_output()
+    for attempt in range(4):
+        yielded_any = False
+        try:
+            prev_msg = ""
+            async with synthesizer_agent.run_stream(
+                f"{synth_context}\n\n---\n\n사용자 메시지: {user_message}",
+                deps=synth_deps,
+                message_history=history,
+            ) as stream:
+                async for partial in stream.stream_output():
+                    msg = getattr(partial, "message", None) or ""
+                    if len(msg) > len(prev_msg):
+                        yield msg[len(prev_msg):]
+                        prev_msg = msg
+                        yielded_any = True
+                result = await stream.get_output()
+            break
+        except Exception as e:
+            if _is_rate_limit_error(e) and attempt < 3 and not yielded_any:
+                wait = _retry_wait(attempt)
+                print(f"[synthesizer] 429 재시도 {attempt + 1}/3, {wait:.1f}s 대기", flush=True)
+                await asyncio.sleep(wait)
+            else:
+                raise
 
     if result.day_plans:
         result = result.model_copy(update={

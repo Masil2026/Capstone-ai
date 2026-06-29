@@ -9,12 +9,13 @@ from pydantic_ai import Agent
 
 _log = logging.getLogger(__name__)
 
+from app.core.config import settings
 from app.schemas.ai_message import OrchestratorResult
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
 from app.services.travel_agent_service import TravelAgentService
-from ._base import _build_model, preprocessor_agent
+from ._base import _build_model, preprocessor_agent, run_with_retry
 
 # ---------------------------------------------------------------------------
 # OrchestratorDeps — 매 요청마다 시스템 프롬프트에 주입되는 컨텍스트
@@ -273,14 +274,22 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
                 section_lines.append(f"  - {d['city']}: {d['start_date']} ~ {d['end_date']}")
         if day_plans:
             section_lines.append("")
-            section_lines.append("### 기존 일정 (수정 시 반드시 이 내용을 기준으로 변경할 것)")
-            for date_key, items in day_plans.items():
-                section_lines.append(f"#### {date_key}")
-                for item in items:
-                    if isinstance(item, dict):
-                        section_lines.append(
-                            f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})"
-                        )
+            if deps.request_type in ("change", "chat"):
+                # 활동 수정·질의응답: 날짜별 전체 상세 필요
+                section_lines.append("### 기존 일정 (수정 시 반드시 이 내용을 기준으로 변경할 것)")
+                for date_key, items in day_plans.items():
+                    section_lines.append(f"#### {date_key}")
+                    for item in items:
+                        if isinstance(item, dict):
+                            section_lines.append(
+                                f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})"
+                            )
+            else:
+                # reservation·cancel·itinerary: 날짜 + 활동 수 요약만
+                section_lines.append("### 기존 일정 요약")
+                for date_key, items in day_plans.items():
+                    count = len(items) if isinstance(items, list) else 0
+                    section_lines.append(f"- {date_key}: {count}개 일정")
         else:
             section_lines.append("- day_plans: 아직 없음")
         sections.append("\n".join(section_lines))
@@ -359,8 +368,12 @@ async def search_web(
     snippets = "\n\n".join(
         f"[{r['title']}]\n{r['content']}" for r in filtered
     )
-    result = await preprocessor_agent.run(
-        f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.\n\n{snippets}"
+    if len(snippets) <= settings.PREPROCESSOR_SKIP_MAX_LEN:
+        return {"status": "success", "summary": snippets, "source_count": len(filtered)}
+    result = await run_with_retry(
+        preprocessor_agent,
+        f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.\n\n{snippets}",
+        role="preprocessor",
     )
     return {"status": "success", "summary": result.output, "source_count": len(filtered)}
 
