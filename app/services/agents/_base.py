@@ -1,6 +1,7 @@
 # app/services/agents/_base.py
 import asyncio
 import random
+import time
 
 from app.core.config import settings
 
@@ -46,6 +47,45 @@ def _build_model(role: str):
 from pydantic_ai import Agent
 
 
+# ── Token Bucket ──────────────────────────────────────────────────────────────
+
+class _TokenBucket:
+    """속도 제한기. 초당 rate개 토큰을 보충하고 capacity를 초과하지 않는다.
+
+    acquire()가 호출될 때 토큰이 없으면 보충될 때까지 대기한다.
+    Semaphore(동시 호출 수 제한)와 달리, 장기 평균 속도만 조절하고 버스트는 허용한다.
+    """
+
+    def __init__(self, rate: float, capacity: float):
+        self._rate = rate          # 초당 토큰 보충 속도 (VERTEX_AI_RPM / 60)
+        self._capacity = capacity  # 최대 버스트 허용 토큰 수
+        self._tokens = capacity    # 시작 시 꽉 채움
+        self._last = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                self._tokens = min(
+                    self._capacity,
+                    self._tokens + (now - self._last) * self._rate,
+                )
+                self._last = now
+                if self._tokens >= 1:
+                    self._tokens -= 1
+                    return
+                wait = (1 - self._tokens) / self._rate
+            await asyncio.sleep(wait)
+
+
+# RPM 기준: rate = 초당 처리량, capacity = RPM의 10% (최소 5)
+_llm_bucket = _TokenBucket(
+    rate=settings.VERTEX_AI_RPM / 60,
+    capacity=max(5.0, settings.VERTEX_AI_RPM / 10),
+)
+
+
 def _is_rate_limit_error(e: Exception) -> bool:
     msg = str(e)
     return "429" in msg or "RESOURCE_EXHAUSTED" in msg
@@ -58,11 +98,13 @@ def _retry_wait(attempt: int) -> float:
 
 
 async def run_with_retry(agent: Agent, prompt: str, *, role: str, max_retries: int = 4, **kwargs):
-    """429 발생 시 지수 백오프 + jitter로 재시도.
+    """Token Bucket으로 속도를 조절한 뒤, 429 발생 시 지수 백오프 + jitter로 재시도.
 
+    - acquire(): 첫 호출 전 1회만 실행 — 재시도는 백오프가 간격을 보장하므로 제외
     - max_retries=4 → 최대 대기 합계 약 1+2+4+8 = 15초
     - jitter: 동시 요청들이 같은 타이밍에 재시도하는 Thundering Herd 방지
     """
+    await _llm_bucket.acquire()
     for attempt in range(max_retries):
         try:
             return await agent.run(prompt, **kwargs)
