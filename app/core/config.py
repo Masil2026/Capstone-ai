@@ -57,6 +57,7 @@ class Settings(BaseSettings):
 
     # --- Vertex AI Rate Limit ---
     VERTEX_AI_RPM: int = 100  # Vertex AI 분당 요청 쿼터 (GCP 콘솔 할당량과 맞춤)
+    PREPROCESSOR_SKIP_MAX_LEN: int = 500  # 이 글자 수 이하면 전처리 LLM 호출 생략
 
     model_config = SettingsConfigDict(
         env_file=".env",

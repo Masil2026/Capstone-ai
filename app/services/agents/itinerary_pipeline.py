@@ -25,6 +25,7 @@ _log = logging.getLogger(__name__)
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
+from app.core.config import settings
 from app.schemas.ai_message import OrchestratorResult
 from app.services.adapters.accommodation_api import AccommodationAdapter
 from app.services.adapters.flight_api import FlightAdapter
@@ -845,6 +846,8 @@ async def _fetch_web_summary(city: str, preferences: dict | None) -> str:
     if not snippets:
         return f"{city} 여행 정보를 찾지 못했습니다."
     combined = "\n\n".join(snippets[:10])
+    if len(combined) <= settings.PREPROCESSOR_SKIP_MAX_LEN:
+        return combined
     pref_hint = ""
     if preferences:
         pref_hint = f"\n\n사용자 취향: {json.dumps(preferences, ensure_ascii=False)}\n위 취향을 참고하여 관련 정보를 일부 포함하되, 현지 대표 음식·명소 등 다양한 여행 정보의 균형을 유지해줘."

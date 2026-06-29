@@ -9,6 +9,7 @@ from pydantic_ai import Agent
 
 _log = logging.getLogger(__name__)
 
+from app.core.config import settings
 from app.schemas.ai_message import OrchestratorResult
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
@@ -359,6 +360,8 @@ async def search_web(
     snippets = "\n\n".join(
         f"[{r['title']}]\n{r['content']}" for r in filtered
     )
+    if len(snippets) <= settings.PREPROCESSOR_SKIP_MAX_LEN:
+        return {"status": "success", "summary": snippets, "source_count": len(filtered)}
     result = await run_with_retry(
         preprocessor_agent,
         f"아래 검색 결과를 여행 계획에 유용한 핵심 정보 위주로 간결하게 요약해줘.\n\n{snippets}",
