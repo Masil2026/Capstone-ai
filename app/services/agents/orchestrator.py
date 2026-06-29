@@ -274,14 +274,22 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
                 section_lines.append(f"  - {d['city']}: {d['start_date']} ~ {d['end_date']}")
         if day_plans:
             section_lines.append("")
-            section_lines.append("### 기존 일정 (수정 시 반드시 이 내용을 기준으로 변경할 것)")
-            for date_key, items in day_plans.items():
-                section_lines.append(f"#### {date_key}")
-                for item in items:
-                    if isinstance(item, dict):
-                        section_lines.append(
-                            f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})"
-                        )
+            if deps.request_type in ("change", "chat"):
+                # 활동 수정·질의응답: 날짜별 전체 상세 필요
+                section_lines.append("### 기존 일정 (수정 시 반드시 이 내용을 기준으로 변경할 것)")
+                for date_key, items in day_plans.items():
+                    section_lines.append(f"#### {date_key}")
+                    for item in items:
+                        if isinstance(item, dict):
+                            section_lines.append(
+                                f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})"
+                            )
+            else:
+                # reservation·cancel·itinerary: 날짜 + 활동 수 요약만
+                section_lines.append("### 기존 일정 요약")
+                for date_key, items in day_plans.items():
+                    count = len(items) if isinstance(items, list) else 0
+                    section_lines.append(f"- {date_key}: {count}개 일정")
         else:
             section_lines.append("- day_plans: 아직 없음")
         sections.append("\n".join(section_lines))
