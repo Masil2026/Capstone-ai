@@ -22,7 +22,7 @@ async def test_vertexai_preprocessor():
 
 @pytest.mark.asyncio
 async def test_vertexai_orchestrator():
-    """Vertex AI gemini-3.1-pro-preview (orchestrator) 연결 테스트 — ADC 인증 확인"""
+    """Vertex AI gemini-2.5-pro (orchestrator) 연결 테스트 — ADC 인증 확인"""
     agent = Agent(model=_build_model("orchestrator"))
 
     try:

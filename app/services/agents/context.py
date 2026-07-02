@@ -25,7 +25,7 @@ if settings.GOOGLE_APPLICATION_CREDENTIALS:
         settings.GOOGLE_APPLICATION_CREDENTIALS,
         scopes=["https://www.googleapis.com/auth/cloud-platform"],
     )
-vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_EMBEDDING_REGION, credentials=_creds)
+vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_REGION, credentials=_creds)
 _EMBEDDING_MODEL = "text-embedding-004"
 _log = logging.getLogger(__name__)
 

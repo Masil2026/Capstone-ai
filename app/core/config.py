@@ -7,13 +7,12 @@ class Settings(BaseSettings):
     # --- LLM Provider ---
     # "vertexai" 고정. .env에서만 변경한다.
     LLM_PROVIDER: str = "vertexai"
-    # None이면 provider 기본값 사용 (vertexai: gemini-3.1-pro-preview / gemini-3.5-flash)
+    # None이면 provider 기본값 사용 (vertexai: gemini-2.5-pro / gemini-3.5-flash)
     ORCHESTRATOR_MODEL: Optional[str] = None
     PREPROCESSOR_MODEL: Optional[str] = None
 
     GOOGLE_CLOUD_PROJECT: Optional[str] = None
-    GOOGLE_CLOUD_REGION: str = "global"
-    GOOGLE_CLOUD_EMBEDDING_REGION: str = "us-central1"
+    GOOGLE_CLOUD_REGION: str = "us-central1"
     GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None  # GCP 서비스 계정 키 파일 경로
 
     # --- Database & Redis ---
