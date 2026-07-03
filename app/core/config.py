@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     # --- LLM Provider ---
     # "vertexai" 고정. .env에서만 변경한다.
     LLM_PROVIDER: str = "vertexai"
-    # None이면 provider 기본값 사용 (vertexai: gemini-2.5-pro / gemini-3.5-flash)
+    # None이면 provider 기본값 사용 (vertexai: gemini-2.5-pro / gemini-2.5-flash)
     ORCHESTRATOR_MODEL: Optional[str] = None
     PREPROCESSOR_MODEL: Optional[str] = None
 

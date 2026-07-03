@@ -2,7 +2,7 @@
 from app.core.config import settings
 
 _PROVIDER_DEFAULTS = {
-    "vertexai": {"orchestrator": "gemini-2.5-pro", "preprocessor": "gemini-3.5-flash"},
+    "vertexai": {"orchestrator": "gemini-2.5-pro", "preprocessor": "gemini-2.5-flash"},
 }
 
 
