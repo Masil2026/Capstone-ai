@@ -57,6 +57,13 @@ def _all_dates(destinations: list[dict]) -> list[str]:
     return dates
 
 
+def _is_day_trip(itinerary: dict) -> bool:
+    """여행 시작일과 종료일이 같으면(0박) 당일치기로 판단한다."""
+    start = itinerary.get("start_date") or ""
+    end = itinerary.get("end_date") or ""
+    return bool(start) and start[:10] == end[:10]
+
+
 _TRANSPORT_KEYWORDS = frozenset({"항공 이동", "기내 (비행 중)"})
 
 
