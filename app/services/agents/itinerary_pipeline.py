@@ -288,6 +288,7 @@ class PlannerDeps:
     today: str
     similar_messages: list[dict]
     replan_dates: list[str]      # 날짜 변경으로 재계획이 필요한 날짜 목록 (없으면 [])
+    is_day_trip: bool = False    # 시작일==종료일(0박) 당일치기 여부
 
 
 planner_agent = Agent(
@@ -343,8 +344,11 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
             f"{leg['from']} → {leg['to']}"
         )
 
+    lines += (
+        ["2. selected_hotels: 각 도시별 숙소 1개씩 선택"] if not d.is_day_trip else
+        ["2. selected_hotels: 당일치기(숙박 없음)이므로 빈 배열로 반환"]
+    )
     lines += [
-        "2. selected_hotels: 각 도시별 숙소 1개씩 선택",
         "3. days: 날짜별 city 필드와 ordered_queries 목록",
         "   - city: 해당 날짜의 여행 도시명 (destinations 배열 기준으로 배정, 한국어 원본)",
         "   - ordered_queries: 방문 순서대로 관광지 + 식사 장소 검색어",
@@ -433,19 +437,20 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         else:
             lines.append("  - 검색 실패 — 이 구간은 selected_flights에 절대 포함하지 말 것.")
 
-    lines += ["", "## 숙소 데이터 (도시별)"]
-    for dest in destinations:
-        city = dest["city"]
-        hotel_data = d.hotels_by_city.get(city, {})
-        lines.append(f"### {city} ({dest['start_date']} ~ {dest['end_date']})")
-        if hotel_data.get("status") == "success":
-            for h in hotel_data.get("data", [])[:6]:
-                lines.append(
-                    f"  - {h.get('name')} | {h.get('address','')} | "
-                    f"{h.get('price_krw',0):,}원 | 평점 {h.get('rating','?')}"
-                )
-        else:
-            lines.append("  - 검색 실패")
+    if not d.is_day_trip:
+        lines += ["", "## 숙소 데이터 (도시별)"]
+        for dest in destinations:
+            city = dest["city"]
+            hotel_data = d.hotels_by_city.get(city, {})
+            lines.append(f"### {city} ({dest['start_date']} ~ {dest['end_date']})")
+            if hotel_data.get("status") == "success":
+                for h in hotel_data.get("data", [])[:6]:
+                    lines.append(
+                        f"  - {h.get('name')} | {h.get('address','')} | "
+                        f"{h.get('price_krw',0):,}원 | 평점 {h.get('rating','?')}"
+                    )
+            else:
+                lines.append("  - 검색 실패")
 
     lines += ["", "## 날씨 (도시별)"]
     for dest in destinations:
@@ -501,6 +506,7 @@ class SynthesizerDeps:
     similar_messages: list[dict]
     attraction_prices: dict[str, str]   # place_name → Tavily 입장료 검색 결과 (없으면 {})
     replan_dates: list[str]             # 날짜 변경으로 재계획이 필요한 날짜 목록 (없으면 [])
+    is_day_trip: bool = False           # 시작일==종료일(0박) 당일치기 여부
 
 
 synthesizer_agent = Agent(
@@ -632,15 +638,22 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "⚠️ 같은 활동을 자정 기준으로 분리한 경우 cost는 첫 번째 조각에만 작성하고, 다음 날짜 continuation 조각의 cost는 반드시 null로 둔다.",
         "   예) 식사 cost는 23:45~23:59 항목에만 작성, 00:00~00:45 continuation 항목은 cost=null.",
         "올바른 예) '09:00 ~ 10:30', '20:07 ~ 23:59', '00:00 ~ 21:22', '23:30 ~ 23:59', '00:00 ~ 02:15'",
-        "",
-        "## 숙소 귀환·휴식 배치 규칙",
-        "⚠️ 숙박이 있는 날짜에는 하루 마지막 외부 일정 후 반드시 숙소/호텔 귀환 및 휴식 항목을 넣는다.",
-        "   예) '관광지 → 숙소 이동 (버스/택시)' 후 '숙소 귀환 및 휴식' 또는 하나로 합쳐 '숙소 귀환 및 휴식'.",
-        "⚠️ 당일 마지막 외부 일정이 23:59에 끝나거나 자정을 넘기면, 귀환/휴식 항목은 다음 날짜 첫 항목으로 작성한다.",
-        "   예) 1일차 '23:45 ~ 23:59 저녁 식사' 다음에는 2일차 '00:00 ~ 07:30 숙소 귀환 및 휴식'을 반드시 넣는다.",
-        "⚠️ 늦은 시간에 식당·카페를 무리하게 추가하지 말고, 숙소 귀환 및 휴식을 우선 배치한다.",
-        "⚠️ 체크인 후 외부 일정이 없으면 '호텔 체크인 및 휴식'으로 하루를 마무리한다.",
-        "   단, 귀국 항공 이동 이후나 체크아웃 후 바로 공항으로 이동하는 마지막 날에는 숙소 귀환 항목을 만들지 않는다.",
+    ]
+
+    if not d.is_day_trip:
+        lines += [
+            "",
+            "## 숙소 귀환·휴식 배치 규칙",
+            "⚠️ 숙박이 있는 날짜에는 하루 마지막 외부 일정 후 반드시 숙소/호텔 귀환 및 휴식 항목을 넣는다.",
+            "   예) '관광지 → 숙소 이동 (버스/택시)' 후 '숙소 귀환 및 휴식' 또는 하나로 합쳐 '숙소 귀환 및 휴식'.",
+            "⚠️ 당일 마지막 외부 일정이 23:59에 끝나거나 자정을 넘기면, 귀환/휴식 항목은 다음 날짜 첫 항목으로 작성한다.",
+            "   예) 1일차 '23:45 ~ 23:59 저녁 식사' 다음에는 2일차 '00:00 ~ 07:30 숙소 귀환 및 휴식'을 반드시 넣는다.",
+            "⚠️ 늦은 시간에 식당·카페를 무리하게 추가하지 말고, 숙소 귀환 및 휴식을 우선 배치한다.",
+            "⚠️ 체크인 후 외부 일정이 없으면 '호텔 체크인 및 휴식'으로 하루를 마무리한다.",
+            "   단, 귀국 항공 이동 이후나 체크아웃 후 바로 공항으로 이동하는 마지막 날에는 숙소 귀환 항목을 만들지 않는다.",
+        ]
+
+    lines += [
         "",
         "## 식사 배치 규칙",
         "- 일반 날: 아침(08:00~09:00), 점심(12:00~13:30), 저녁(18:30~20:00) 3회 포함",
@@ -670,12 +683,19 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         '      → {"amount": 85000, "currency": "JPY", "amount_krw": 780000}',
         '  예) currency="KRW", price_original=775570',
         '      → {"amount": 775570, "currency": "KRW"}  ← amount_krw 없음',
-        "",
-        "- 숙소 체크인 항목: API 검색 결과의 price_original·currency 그대로 사용.",
-        "  (API가 전체 숙박 기간 합산 금액을 반환함 — 박 수 곱하기 금지)",
-        "  currency != 'KRW'이고 price_krw 있으면 amount_krw에 기입. price_krw 없으면 cost=null.",
-        '  예) currency="EUR", price_original=300, price_krw=453000',
-        '      → {"amount": 300, "currency": "EUR", "amount_krw": 453000}',
+    ]
+
+    if not d.is_day_trip:
+        lines += [
+            "",
+            "- 숙소 체크인 항목: API 검색 결과의 price_original·currency 그대로 사용.",
+            "  (API가 전체 숙박 기간 합산 금액을 반환함 — 박 수 곱하기 금지)",
+            "  currency != 'KRW'이고 price_krw 있으면 amount_krw에 기입. price_krw 없으면 cost=null.",
+            '  예) currency="EUR", price_original=300, price_krw=453000',
+            '      → {"amount": 300, "currency": "EUR", "amount_krw": 453000}',
+        ]
+
+    lines += [
         "",
         "- 식사: 현지 물가 기준 1인 추정액 × 전체 인원. amount_krw 절대 작성 금지.",
         f"  성인 {adults}명 + 어린이 {children}명 = 총 {total_people}명",
@@ -744,13 +764,14 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
             f"{fl.departing_at} ~ {fl.arriving_at} | 비행시간 {fl.duration} | {fl.price_krw:,}원 ({fl.currency} {fl.price_original}) | {stops_str}"
         )
 
-    lines += ["", "## 선택된 숙소"]
-    for h in po.selected_hotels:
-        price_str = f"{h.price_krw:,}원" if h.price_krw else "가격정보없음"
-        lines.append(
-            f"- {h.city}: {h.name} | {h.address} | "
-            f"{h.check_in} ~ {h.check_out} | {price_str} ({h.currency} {h.price_original})"
-        )
+    if not d.is_day_trip:
+        lines += ["", "## 선택된 숙소"]
+        for h in po.selected_hotels:
+            price_str = f"{h.price_krw:,}원" if h.price_krw else "가격정보없음"
+            lines.append(
+                f"- {h.city}: {h.name} | {h.address} | "
+                f"{h.check_in} ~ {h.check_out} | {price_str} ({h.currency} {h.price_original})"
+            )
 
     lines += ["", "## 날씨 (도시별)"]
     for dest in destinations:
@@ -1043,6 +1064,11 @@ async def _fetch_hotels_all(
     }
 
 
+async def _no_hotels(destinations: list[dict]) -> dict[str, dict]:
+    """당일치기(숙박 없음)일 때 숙소 검색을 생략하고 빈 결과를 반환한다."""
+    return {d["city"]: {"status": "skipped", "message": "당일치기로 숙소 검색 생략"} for d in destinations}
+
+
 # ── Phase 3 헬퍼 함수들 ──────────────────────────────────────────────────
 
 async def _fetch_places(planner_output: PlannerOutput) -> dict[str, dict]:
@@ -1286,6 +1312,7 @@ async def run_itinerary_pipeline(
     children = itinerary.get("child_count") or 0
     child_ages = itinerary.get("child_ages") or []
     budget = itinerary.get("budget")
+    is_day_trip = _is_day_trip(itinerary)
 
     # 날짜 변경 감지: 기존 day_plans가 있으면 교통 이동일 제거 + 재계획 날짜 산출
     replan_dates: list[str] = []
@@ -1308,11 +1335,15 @@ async def run_itinerary_pipeline(
     )
 
     # ── Phase 1: 병렬 데이터 수집 ──────────────────────────────────────
+    hotels_coro = (
+        _no_hotels(destinations) if is_day_trip
+        else _fetch_hotels_all(cities_en, destinations, adults, children, child_ages)
+    )
     web_summaries, weather_by_city, flight_legs, hotels_by_city = await asyncio.gather(
         _fetch_web_summaries(destinations, deps.preferences),
         _fetch_weather_all(destinations, deps.today),
         _fetch_flight_legs(destinations, cities_en, adults, children, child_ages),
-        _fetch_hotels_all(cities_en, destinations, adults, children, child_ages),
+        hotels_coro,
     )
 
     print(
@@ -1337,6 +1368,7 @@ async def run_itinerary_pipeline(
         today=deps.today,
         similar_messages=deps.similar_messages,
         replan_dates=replan_dates,
+        is_day_trip=is_day_trip,
     )
     planner_context = _build_planner_prompt(planner_deps)
     planner_result = await planner_agent.run(
@@ -1411,6 +1443,7 @@ async def run_itinerary_pipeline(
         similar_messages=deps.similar_messages,
         attraction_prices=attraction_prices,
         replan_dates=replan_dates,
+        is_day_trip=is_day_trip,
     )
     synth_context = _build_synthesizer_prompt(synth_deps)
     async with synthesizer_agent.run_stream(
