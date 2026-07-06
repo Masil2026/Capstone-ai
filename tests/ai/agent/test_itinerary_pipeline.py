@@ -23,10 +23,17 @@ from unittest.mock import AsyncMock, patch
 
 from app.services.agents.itinerary_pipeline import (
     _all_dates,
+    _is_day_trip,
     _is_transport_day,
     _get_replan_dates_for_date_change,
     _normalize_overnight_day_plans,
     _fetch_flight_legs,
+    _no_hotels,
+    _build_planner_prompt,
+    _build_synthesizer_prompt,
+    PlannerDeps,
+    SynthesizerDeps,
+    PlannerOutput,
     _service,
 )
 
@@ -481,3 +488,125 @@ class TestFetchFlightLegsFilter:
         assert "connect" in directions
         assert "return" in directions
         assert len(legs) == 3  # depart(0) + connect(1) + return(2)
+
+
+# ── _is_day_trip ────────────────────────────────────────────────────────────
+
+class TestIsDayTrip:
+    def test_same_start_end_is_day_trip(self):
+        assert _is_day_trip({"start_date": "2026-06-01", "end_date": "2026-06-01"}) is True
+
+    def test_different_start_end_is_not_day_trip(self):
+        assert _is_day_trip({"start_date": "2026-06-01", "end_date": "2026-06-03"}) is False
+
+    def test_missing_start_date_is_not_day_trip(self):
+        assert _is_day_trip({"end_date": "2026-06-01"}) is False
+
+    def test_datetime_suffix_ignored(self):
+        """start_date/end_date에 시간까지 포함돼도 날짜(앞 10자리)만 비교"""
+        itinerary = {"start_date": "2026-06-01T00:00:00", "end_date": "2026-06-01T00:00:00"}
+        assert _is_day_trip(itinerary) is True
+
+
+# ── _no_hotels ────────────────────────────────────────────────────────────────
+
+class TestNoHotels:
+    @pytest.mark.asyncio
+    async def test_returns_skipped_status_per_city(self):
+        destinations = [_dest("서울", "2026-06-01", "2026-06-01")]
+        result = await _no_hotels(destinations)
+        assert result == {"서울": {"status": "skipped", "message": "당일치기로 숙소 검색 생략"}}
+
+
+# ── 당일치기 프롬프트 분기 (_build_planner_prompt / _build_synthesizer_prompt) ──
+
+def _make_planner_deps(is_day_trip: bool) -> PlannerDeps:
+    destinations = [_dest("서울", "2026-06-01", "2026-06-01")]
+    itinerary_info = {
+        "destinations": destinations,
+        "start_date": "2026-06-01",
+        "end_date": "2026-06-01",
+        "total_days": 1,
+        "budget": None,
+        "adult_count": 2,
+        "child_count": 0,
+        "child_ages": [],
+        "day_plans": None,
+    }
+    return PlannerDeps(
+        itinerary_info=itinerary_info,
+        web_summaries={"서울": "정보 없음"},
+        weather_by_city={"서울": []},
+        flight_legs=[],
+        hotels_by_city={"서울": {"status": "skipped"}},
+        cities_en=["Seoul"],
+        preferences=None,
+        ai_summary=None,
+        today="2026-05-01",
+        similar_messages=[],
+        replan_dates=[],
+        is_day_trip=is_day_trip,
+    )
+
+
+def _make_synth_deps(is_day_trip: bool) -> SynthesizerDeps:
+    destinations = [_dest("서울", "2026-06-01", "2026-06-01")]
+    itinerary_info = {
+        "destinations": destinations,
+        "start_date": "2026-06-01",
+        "end_date": "2026-06-01",
+        "total_days": 1,
+        "budget": None,
+        "adult_count": 2,
+        "child_count": 0,
+        "child_ages": [],
+        "day_plans": None,
+    }
+    return SynthesizerDeps(
+        itinerary_info=itinerary_info,
+        planner_output=PlannerOutput(days=[], selected_flights=[], selected_hotels=[]),
+        place_results={},
+        route_results={},
+        weather_by_city={"서울": []},
+        web_summaries={"서울": "정보 없음"},
+        preferences=None,
+        ai_summary=None,
+        today="2026-05-01",
+        similar_messages=[],
+        attraction_prices={},
+        replan_dates=[],
+        is_day_trip=is_day_trip,
+    )
+
+
+class TestPlannerPromptDayTrip:
+    def test_day_trip_hides_hotel_sections(self):
+        prompt = _build_planner_prompt(_make_planner_deps(is_day_trip=True))
+        assert "## 숙소 데이터 (도시별)" not in prompt
+        assert "당일치기(숙박 없음)이므로 빈 배열로 반환" in prompt
+        assert "## 당일치기 시간 범위 제약" in prompt
+        assert "하루 총 4~6개 항목" in prompt
+
+    def test_normal_trip_keeps_hotel_sections(self):
+        prompt = _build_planner_prompt(_make_planner_deps(is_day_trip=False))
+        assert "## 숙소 데이터 (도시별)" in prompt
+        assert "2. selected_hotels: 각 도시별 숙소 1개씩 선택" in prompt
+        assert "## 당일치기 시간 범위 제약" not in prompt
+        assert "하루 총 7~10개 항목" in prompt
+
+
+class TestSynthesizerPromptDayTrip:
+    def test_day_trip_hides_hotel_sections(self):
+        prompt = _build_synthesizer_prompt(_make_synth_deps(is_day_trip=True))
+        assert "## 숙소 귀환·휴식 배치 규칙" not in prompt
+        assert "## 선택된 숙소" not in prompt
+        assert "- 숙소 체크인 항목" not in prompt
+        assert "## 당일치기 시작/종료 시간 범위" in prompt
+        assert "편의점 간단 식사 후 귀가 이동 준비" in prompt
+
+    def test_normal_trip_keeps_hotel_sections(self):
+        prompt = _build_synthesizer_prompt(_make_synth_deps(is_day_trip=False))
+        assert "## 숙소 귀환·휴식 배치 규칙" in prompt
+        assert "## 선택된 숙소" in prompt
+        assert "- 숙소 체크인 항목" in prompt
+        assert "## 당일치기 시작/종료 시간 범위" not in prompt
