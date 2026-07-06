@@ -1,6 +1,7 @@
 # app/controller/aiMessageController.py
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import date, datetime
@@ -27,6 +28,7 @@ from app.services.agents.itinerary_patch import try_patch_itinerary_item
 from app.services.agents.itinerary_pipeline import run_itinerary_pipeline
 from app.services.agents.memory import save_memory
 from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agent, build_context_prompt
+from app.services.agents._base import run_with_retry, _is_rate_limit_error, _retry_wait
 
 router = APIRouter()
 
@@ -377,7 +379,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
 
     # [2] 타입 판별
     try:
-        cls_result = await classification_agent.run(user_message)
+        cls_result = await run_with_retry(classification_agent, user_message, role="classification")
         request_type = cls_result.output.type
     except Exception:
         request_type = "chat"
@@ -504,28 +506,52 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
 
             if orch_result is None:
                 print("[_stream] pipeline None → orchestrator 스트리밍 폴백", flush=True)
-                async with orchestrator_agent.run_stream(
-                    prompt, deps=deps, message_history=ctx["history"]
-                ) as stream_result:
-                    prev_msg = ""
-                    async for partial in stream_result.stream_output():
-                        msg = getattr(partial, "message", None) or ""
-                        if len(msg) > len(prev_msg):
-                            yield _sse("chunk", {"content": msg[len(prev_msg):]})
-                            prev_msg = msg
-                    orch_result = await stream_result.get_output()
+                for attempt in range(4):
+                    yielded_any = False
+                    try:
+                        prev_msg = ""
+                        async with orchestrator_agent.run_stream(
+                            prompt, deps=deps, message_history=ctx["history"]
+                        ) as stream_result:
+                            async for partial in stream_result.stream_output():
+                                msg = getattr(partial, "message", None) or ""
+                                if len(msg) > len(prev_msg):
+                                    yield _sse("chunk", {"content": msg[len(prev_msg):]})
+                                    prev_msg = msg
+                                    yielded_any = True
+                            orch_result = await stream_result.get_output()
+                        break
+                    except Exception as e:
+                        if _is_rate_limit_error(e) and attempt < 3 and not yielded_any:
+                            wait = _retry_wait(attempt)
+                            print(f"[orchestrator] 429 재시도 {attempt + 1}/3, {wait:.1f}s 대기", flush=True)
+                            await asyncio.sleep(wait)
+                        else:
+                            raise
         else:
             print("[_stream] orchestrator_agent.run_stream() 호출", flush=True)
-            async with orchestrator_agent.run_stream(
-                prompt, deps=deps, message_history=ctx["history"]
-            ) as stream_result:
-                prev_msg = ""
-                async for partial in stream_result.stream_output():
-                    msg = getattr(partial, "message", None) or ""
-                    if len(msg) > len(prev_msg):
-                        yield _sse("chunk", {"content": msg[len(prev_msg):]})
-                        prev_msg = msg
-                orch_result = await stream_result.get_output()
+            for attempt in range(4):
+                yielded_any = False
+                try:
+                    prev_msg = ""
+                    async with orchestrator_agent.run_stream(
+                        prompt, deps=deps, message_history=ctx["history"]
+                    ) as stream_result:
+                        async for partial in stream_result.stream_output():
+                            msg = getattr(partial, "message", None) or ""
+                            if len(msg) > len(prev_msg):
+                                yield _sse("chunk", {"content": msg[len(prev_msg):]})
+                                prev_msg = msg
+                                yielded_any = True
+                        orch_result = await stream_result.get_output()
+                    break
+                except Exception as e:
+                    if _is_rate_limit_error(e) and attempt < 3 and not yielded_any:
+                        wait = _retry_wait(attempt)
+                        print(f"[orchestrator] 429 재시도 {attempt + 1}/3, {wait:.1f}s 대기", flush=True)
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
             print(f"[_stream] 스트리밍 완료. message={orch_result.message[:80]!r}", flush=True)
 
         full_response: str = orch_result.message

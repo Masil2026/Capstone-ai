@@ -48,6 +48,10 @@ _HOTEL_TERMS = ("숙소", "호텔", "체크인")
 _HOTEL_STRONG_TERMS = ("체크인", "호텔", "숙박")
 _MEAL_TERMS = ("아침", "점심", "저녁", "브런치", "간식", "야식")
 _MEAL_DESIRE_WORDS = ("먹고", "먹을", "먹자", "추가", "넣어", "싶어", "싶은")
+_GENERIC_PLACE_PHRASES = {
+    "다른 곳", "다른곳", "다른 데", "다른데", "다른 것", "다른거", "다른 걸", "다른걸",
+    "새로운 곳", "새로운 데", "어딘가", "아무 데나", "아무데나", "다른 식당", "다른식당",
+}
 _MEAL_DEFAULT_TIMES = {
     "아침": "08:00 ~ 09:00",
     "브런치": "10:00 ~ 11:00",
@@ -233,6 +237,8 @@ def _extract_requested_food(user_message: str, meal_slot: str) -> str | None:
         maxsplit=1,
     )[0]
     food = re.sub(r"\s*(을|를|으로|로|에)$", "", food).strip()
+    if food in _GENERIC_PLACE_PHRASES:
+        return None
     return food or None
 
 

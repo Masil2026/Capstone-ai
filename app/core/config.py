@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # --- Internal Token (Spring Boot ↔ FastAPI 서버 간 인증) ---
     INTERNAL_TOKEN: str
 
+    # --- Vertex AI Rate Limit ---
+    VERTEX_AI_RPM: int = 100  # Vertex AI 분당 요청 쿼터 (GCP 콘솔 할당량과 맞춤)
+    PREPROCESSOR_SKIP_MAX_LEN: int = 100  # 이 글자 수 이하면 전처리 LLM 호출 생략 (검색 실패 수준)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
