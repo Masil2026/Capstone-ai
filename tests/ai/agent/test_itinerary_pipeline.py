@@ -28,14 +28,22 @@ from app.services.agents.itinerary_pipeline import (
     _get_replan_dates_for_date_change,
     _normalize_overnight_day_plans,
     _fetch_flight_legs,
+    _fetch_hotels,
+    _normalize_booking_hotels,
+    _korea_pick_image,
+    _korea_keyword,
+    _attach_media,
     _no_hotels,
     _build_planner_prompt,
     _build_synthesizer_prompt,
     PlannerDeps,
     SynthesizerDeps,
     PlannerOutput,
+    SelectedFlight,
+    SelectedHotel,
     _service,
 )
+from app.schemas.ai_message import DayPlanItem
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────────────────────
@@ -369,17 +377,32 @@ class TestGetReplanDates:
 class TestFetchFlightLegsFilter:
 
     def _make_offer(self, arriving_at: str) -> dict:
+        """Booking search_flights offer(segments 구조) 형태."""
         return {
-            "airline": "Test Air",
-            "origin": "PRG",
-            "destination": "ICN",
-            "departing_at": "2026-12-29T22:00:00+01:00",
-            "arriving_at": arriving_at,
-            "price_original": 800.0,
-            "currency": "EUR",
-            "price_krw": 1200000,
-            "stops": 0,
+            "token": "TKN",
+            "trip_type": "ONEWAY",
+            "is_direct": True,
+            "price": 1200000,
+            "price_rounded": 1200000,
+            "currency": "KRW",
+            "segments": [{
+                "from": "PRG",
+                "to": "ICN",
+                "departure_time": "2026-12-29T22:00:00+01:00",
+                "arrival_time": arriving_at,
+                "total_time_sec": 43200,
+                "stops": 0,
+                "legs": [{
+                    "from": "PRG", "to": "ICN", "flight_number": "TA1",
+                    "carriers": ["Test Air"], "logo": "http://logo/ta.png",
+                    "cabin_class": "ECONOMY",
+                }],
+            }],
         }
+
+    def _loc_ok(self, params):
+        code = (params.get("query", "XXX")[:3] or "XXX").upper()
+        return {"status": "success", "data": {"selected": {"id": f"{code}.AIRPORT"}}}
 
     @pytest.mark.asyncio
     async def test_filters_offers_arriving_after_end_date(self):
@@ -389,11 +412,10 @@ class TestFetchFlightLegsFilter:
         invalid_offer = self._make_offer("2026-12-31T18:00:00+09:00")  # 익일 도착 ✗
 
         def _mock_task(tool, action, params):
-            departure_date = params.get("departure_date", "")
-            if departure_date == end_date:
-                return {"status": "success", "data": [invalid_offer], "count": 1}
-            else:  # end_date - 1
-                return {"status": "success", "data": [valid_offer], "count": 1}
+            if action == "search_flight_location":
+                return self._loc_ok(params)
+            flights = [invalid_offer] if params.get("departDate") == end_date else [valid_offer]
+            return {"status": "success", "data": {"flights": flights, "booking_list_url": "http://list"}}
 
         destinations = [{"city": "프라하", "start_date": "2026-12-20", "end_date": end_date}]
         with patch.object(_service, "process_task", side_effect=AsyncMock(side_effect=_mock_task)):
@@ -415,17 +437,14 @@ class TestFetchFlightLegsFilter:
     async def test_keeps_offers_arriving_on_end_date(self):
         """end_date 당일 도착 귀국편은 필터링되지 않고 유지"""
         end_date = "2026-05-18"
-        # end_date 출발편 → 당일 도착 (유효)
         offer_same_day = self._make_offer("2026-05-18T16:00:00+09:00")
-        # end_date-1 출발편 → 당일 도착 (유효)
         offer_prev_day = self._make_offer("2026-05-18T10:00:00+09:00")
 
         def _mock_task(tool, action, params):
-            departure_date = params.get("departure_date", "")
-            if departure_date == end_date:
-                return {"status": "success", "data": [offer_same_day], "count": 1}
-            else:
-                return {"status": "success", "data": [offer_prev_day], "count": 1}
+            if action == "search_flight_location":
+                return self._loc_ok(params)
+            flights = [offer_same_day] if params.get("departDate") == end_date else [offer_prev_day]
+            return {"status": "success", "data": {"flights": flights, "booking_list_url": "http://list"}}
 
         destinations = [{"city": "도쿄", "start_date": "2026-05-15", "end_date": end_date}]
         with patch.object(_service, "process_task", side_effect=AsyncMock(side_effect=_mock_task)):
@@ -437,9 +456,7 @@ class TestFetchFlightLegsFilter:
 
         return_leg = next(l for l in legs if l["direction"] == "return")
         offers = return_leg["data"]["data"]
-        # 두 날짜 모두 end_date 도착이므로 2개 모두 유지
         assert len(offers) == 2
-        # 모든 offer가 end_date 이내 도착임을 확인
         assert all(o["arriving_at"][:10] <= end_date for o in offers)
 
     @pytest.mark.asyncio
@@ -449,7 +466,9 @@ class TestFetchFlightLegsFilter:
         only_late_offer = self._make_offer("2026-12-31T18:00:00+09:00")
 
         def _mock_task(tool, action, params):
-            return {"status": "success", "data": [only_late_offer], "count": 1}
+            if action == "search_flight_location":
+                return self._loc_ok(params)
+            return {"status": "success", "data": {"flights": [only_late_offer], "booking_list_url": "http://list"}}
 
         destinations = [{"city": "런던", "start_date": "2026-12-20", "end_date": end_date}]
         with patch.object(_service, "process_task", side_effect=AsyncMock(side_effect=_mock_task)):
@@ -460,7 +479,6 @@ class TestFetchFlightLegsFilter:
             )
 
         return_leg = next(l for l in legs if l["direction"] == "return")
-        # 유효 편 없으면 전체 결과 유지 (fallback)
         assert return_leg["data"]["status"] == "success"
         assert len(return_leg["data"]["data"]) >= 1
 
@@ -470,7 +488,9 @@ class TestFetchFlightLegsFilter:
         end_date = "2026-12-30"
 
         def _mock_task(tool, action, params):
-            return {"status": "success", "data": [], "count": 0}
+            if action == "search_flight_location":
+                return self._loc_ok(params)
+            return {"status": "success", "data": {"flights": [], "booking_list_url": "http://list"}}
 
         destinations = [
             {"city": "파리", "start_date": "2026-12-20", "end_date": "2026-12-25"},
@@ -488,6 +508,31 @@ class TestFetchFlightLegsFilter:
         assert "connect" in directions
         assert "return" in directions
         assert len(legs) == 3  # depart(0) + connect(1) + return(2)
+
+    @pytest.mark.asyncio
+    async def test_normalizes_booking_offer_to_flat_shape(self):
+        """Booking offer가 평면 shape + image_url(로고)·url(리스트)로 정규화되는지"""
+        offer = self._make_offer("2026-12-24T18:00:00+09:00")
+
+        def _mock_task(tool, action, params):
+            if action == "search_flight_location":
+                return self._loc_ok(params)
+            return {"status": "success", "data": {"flights": [offer], "booking_list_url": "http://list"}}
+
+        destinations = [{"city": "프라하", "start_date": "2026-12-20", "end_date": "2026-12-25"}]
+        with patch.object(_service, "process_task", side_effect=AsyncMock(side_effect=_mock_task)):
+            legs = await _fetch_flight_legs(
+                destinations=destinations, cities_en=["Prague"],
+                adults=1, children=0, child_ages=[],
+            )
+
+        depart = next(l for l in legs if l["direction"] == "depart")
+        f = depart["data"]["data"][0]
+        assert f["airline"] == "Test Air"
+        assert f["origin"] == "PRG" and f["destination"] == "ICN"
+        assert f["price_krw"] == 1200000 and f["currency"] == "KRW"
+        assert f["image_url"] == "http://logo/ta.png"   # 대표 항공사 로고
+        assert f["url"] == "http://list"                # 검색 리스트 URL
 
 
 # ── _is_day_trip ────────────────────────────────────────────────────────────
@@ -610,3 +655,190 @@ class TestSynthesizerPromptDayTrip:
         assert "## 선택된 숙소" in prompt
         assert "- 숙소 체크인 항목" in prompt
         assert "## 당일치기 시작/종료 시간 범위" not in prompt
+
+
+# ── Booking 숙소 정규화 ───────────────────────────────────────────────────────
+
+class TestNormalizeBookingHotels:
+    def _raw(self):
+        return {"status": "success", "data": {"hotels": [
+            {"hotel_id": 111, "name": "롯데호텔", "summary": "명동 5성급",
+             "price": 300000, "review_score": 8.9, "star": 5,
+             "photo": "http://img/lotte.jpg"},
+        ]}}
+
+    def test_maps_to_flat_with_media(self):
+        out = _normalize_booking_hotels(self._raw())
+        assert out["status"] == "success"
+        h = out["data"][0]
+        assert h["name"] == "롯데호텔"
+        assert h["price_krw"] == 300000
+        assert h["rating"] == 8.9
+        assert h["image_url"] == "http://img/lotte.jpg"
+        assert h["hotel_id"] == 111
+        assert h["url"] is None   # booking_url은 join 단계에서 채움
+
+    def test_error_passthrough(self):
+        out = _normalize_booking_hotels({"status": "error", "message": "x"})
+        assert out["status"] == "error"
+        assert out["data"] == []
+
+
+# ── 한국관광공사 이미지 매칭 ──────────────────────────────────────────────────
+
+class TestKoreaPickImage:
+    def _raw(self, items):
+        return {"status": "success", "data": {"items": items}}
+
+    def test_firstimage_preferred(self):
+        raw = self._raw([{"title": "경복궁", "firstimage": "a.jpg", "firstimage2": "b.jpg", "contentid": "1"}])
+        assert _korea_pick_image(raw, "경복궁") == ("a.jpg", "1")
+
+    def test_fallback_to_firstimage2(self):
+        raw = self._raw([{"title": "경복궁", "firstimage": "", "firstimage2": "b.jpg", "contentid": "1"}])
+        assert _korea_pick_image(raw, "경복궁") == ("b.jpg", "1")
+
+    def test_no_image_returns_none_image(self):
+        raw = self._raw([{"title": "경복궁", "firstimage": "", "firstimage2": "", "contentid": "1"}])
+        assert _korea_pick_image(raw, "경복궁") == (None, "1")
+
+    def test_no_match_returns_none(self):
+        raw = self._raw([{"title": "다른곳", "firstimage": "a.jpg", "contentid": "1"},
+                         {"title": "또다른곳", "firstimage": "c.jpg", "contentid": "2"}])
+        assert _korea_pick_image(raw, "센소지") == (None, None)
+
+    def test_error_returns_none(self):
+        assert _korea_pick_image({"status": "error"}, "x") == (None, None)
+
+
+# ── _attach_media: day_plans 후처리 조인 ──────────────────────────────────────
+
+class TestAttachMedia:
+    @pytest.mark.asyncio
+    async def test_injects_place_hotel_flight_media(self):
+        # day_plans: 관광지 + 호텔 체크인 + 항공 이동
+        day_plans = {
+            "2026-05-01": [
+                DayPlanItem(plan_name="대한항공 기내 (비행 중) → NRT 도착", time="00:00 ~ 12:00", place="기내"),
+                DayPlanItem(plan_name="센소지 관광", time="13:00 ~ 15:00", place="센소지"),
+                DayPlanItem(plan_name="롯데호텔 체크인", time="18:00 ~ 19:00", place="롯데호텔"),
+            ],
+        }
+        planner_output = PlannerOutput(
+            days=[],
+            selected_flights=[SelectedFlight(
+                direction="depart", leg_index=0, airline="대한항공",
+                origin="ICN", destination="NRT",
+                departing_at="2026-05-01T09:00:00+09:00", arriving_at="2026-05-01T12:00:00+09:00",
+                price_original=500000, currency="KRW", price_krw=500000, stops=0,
+            )],
+            selected_hotels=[SelectedHotel(
+                city="도쿄", name="롯데호텔", address="신주쿠",
+                check_in="2026-05-01", check_out="2026-05-03",
+                price_original=300000, currency="KRW", price_krw=300000,
+            )],
+        )
+        place_results = {"센소지": {"status": "success", "image_url": "http://kto/senso.jpg", "contentid": "9"}}
+        flight_legs = [{"leg_index": 0, "direction": "depart", "data": {"status": "success", "data": [{
+            "airline": "대한항공", "departing_at": "2026-05-01T09:00:00+09:00",
+            "image_url": "http://logo/ke.png", "url": "http://booking/list",
+        }]}}]
+        hotels_by_city = {"도쿄": {"status": "success", "data": [{
+            "name": "롯데호텔", "hotel_id": 111, "image_url": "http://img/lotte.jpg",
+        }]}}
+
+        def _mock_task(tool, action, params):
+            if action == "get_hotel_details":
+                return {"status": "success", "data": {"booking_url": "http://booking/lotte"}}
+            return {"status": "error"}
+
+        with patch.object(_service, "process_task", side_effect=AsyncMock(side_effect=_mock_task)):
+            out = await _attach_media(day_plans, planner_output, place_results,
+                                      flight_legs, hotels_by_city, adults=1, child_ages=[])
+
+        items = {it.plan_name: it for it in out["2026-05-01"]}
+        # 항공: 로고 + 검색 리스트 URL
+        flight = items["대한항공 기내 (비행 중) → NRT 도착"]
+        assert flight.image_url == "http://logo/ke.png"
+        assert flight.url == "http://booking/list"
+        # 장소: 한국관광공사 firstimage
+        assert items["센소지 관광"].image_url == "http://kto/senso.jpg"
+        assert items["센소지 관광"].url is None
+        # 숙소: 사진 + booking_url(상세 호출)
+        hotel = items["롯데호텔 체크인"]
+        assert hotel.image_url == "http://img/lotte.jpg"
+        assert hotel.url == "http://booking/lotte"
+
+    @pytest.mark.asyncio
+    async def test_no_match_keeps_none(self):
+        day_plans = {"2026-05-01": [DayPlanItem(plan_name="자유 산책", time="10:00 ~ 11:00", place="어딘가")]}
+        planner_output = PlannerOutput(days=[], selected_flights=[], selected_hotels=[])
+        with patch.object(_service, "process_task", side_effect=AsyncMock(return_value={"status": "error"})):
+            out = await _attach_media(day_plans, planner_output, {}, [], {}, adults=1, child_ages=[])
+        item = out["2026-05-01"][0]
+        assert item.image_url is None and item.url is None
+
+
+# ── 국내 노선 김포(GMP) 우선 ──────────────────────────────────────────────────
+
+class TestDomesticGimpoPreference:
+    def _loc(self, city):
+        table = {
+            "Seoul": {"selected": {"id": "ICN.AIRPORT", "code": "ICN", "country": "대한민국"},
+                      "candidates": [{"id": "ICN.AIRPORT", "code": "ICN", "country": "대한민국"},
+                                     {"id": "GMP.AIRPORT", "code": "GMP", "country": "대한민국"}]},
+            "Jeju": {"selected": {"id": "CJU.AIRPORT", "code": "CJU", "country": "대한민국"},
+                     "candidates": [{"id": "CJU.AIRPORT", "code": "CJU", "country": "대한민국"}]},
+            "Tokyo": {"selected": {"id": "NRT.AIRPORT", "code": "NRT", "country": "Japan"},
+                      "candidates": [{"id": "NRT.AIRPORT", "code": "NRT", "country": "Japan"}]},
+        }
+        return {"status": "success", "data": table[city]}
+
+    async def _run(self, city_en, dest_city):
+        calls = []
+
+        def _mock_task(tool, action, params):
+            if action == "search_flight_location":
+                return self._loc(params["query"])
+            if action == "search_flights":
+                calls.append(params)
+            return {"status": "success", "data": {"flights": [], "booking_list_url": "x"}}
+
+        destinations = [{"city": dest_city, "start_date": "2026-06-01", "end_date": "2026-06-03"}]
+        with patch.object(_service, "process_task", side_effect=AsyncMock(side_effect=_mock_task)):
+            await _fetch_flight_legs(destinations=destinations, cities_en=[city_en],
+                                     adults=1, children=0, child_ages=[])
+        return {i for p in calls for i in (p["fromId"], p["toId"])}
+
+    @pytest.mark.asyncio
+    async def test_domestic_uses_gimpo_not_incheon(self):
+        """제주(국내) 여행: 서울 출발이 ICN이 아니라 GMP로 잡혀야 함"""
+        ids = await self._run("Jeju", "제주")
+        assert "GMP.AIRPORT" in ids
+        assert "ICN.AIRPORT" not in ids   # 인천 국제선 오선택 방지
+
+    @pytest.mark.asyncio
+    async def test_international_uses_incheon(self):
+        """도쿄(국제) 여행: 서울 출발은 기존대로 ICN"""
+        ids = await self._run("Tokyo", "도쿄")
+        assert "ICN.AIRPORT" in ids
+        assert "GMP.AIRPORT" not in ids
+
+
+# ── 한국관광공사 검색 키워드 추출 (Google용 ordered_query → 장소명) ──────────────
+
+class TestKoreaKeyword:
+    def test_extracts_place_name(self):
+        assert _korea_keyword("비자림 제주 (Jeju)", "제주도") == "비자림"
+        assert _korea_keyword("만장굴 제주 (Jeju)", "제주도") == "만장굴"
+
+    def test_keeps_multiword_attraction(self):
+        assert _korea_keyword("오설록 티 뮤지엄 제주 (Jeju)", "제주도") == "오설록 티 뮤지엄"
+
+    def test_skips_meal_and_transit_queries(self):
+        assert _korea_keyword("저녁식사 흑돼지 구이 제주 (Jeju)", "제주도") is None
+        assert _korea_keyword("제주국제공항 근처 아침식사 제주 (Jeju)", "제주도") is None
+
+    def test_strips_city_variants(self):
+        # 도시명이 '제주도'/'제주' 어느 형태로 붙어도 제거
+        assert _korea_keyword("성산일출봉 제주도 (Jeju)", "제주도") == "성산일출봉"
