@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-from datetime import date, datetime
+from datetime import date
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -12,7 +11,6 @@ from fastapi.responses import StreamingResponse
 from app.core.auth import verify_internal_token
 from app.schemas.ai_message import (
     AiMessageRequest,
-    CancelFields,
     CancelPayload,
     ChangePayload,
     DoneEvent,
@@ -36,13 +34,6 @@ router = APIRouter()
 # cancel 선처리 — 오케스트레이터 호출 전 가로채기
 # ---------------------------------------------------------------------------
 
-_NUMBER_RE = re.compile(r'(?:^|\s)\d+\s*번|첫\s*번째|두\s*번째|세\s*번째')
-_IATA_RE = re.compile(r'\b[A-Z]{3}\b')
-_ORDINAL_INDEX = {
-    "첫": 0,
-    "두": 1,
-    "세": 2,
-}
 _ITINERARY_CHANGE_KEYWORDS = (
     "숙소",
     "호텔",
@@ -107,92 +98,6 @@ _RESERVATION_INTENT_KEYWORDS = ("예약", "예매", "새로 잡아", "다시 잡
 _RESERVATION_CHANGE_CONFIRM_MESSAGE = "기존 예약을 취소하고 새로 예약할까요?"
 
 
-def _build_cancel_list_message(reservations: list[dict]) -> str:
-    """취소 후보 목록 메시지 생성 (구조화된 reservations 데이터 기반)."""
-    lines = ["현재 예약 내역입니다:\n"]
-    for i, r in enumerate(reservations, 1):
-        detail = r.get("detail") or {}
-        rtype_str = "항공" if r.get("type") == "flight" else "숙소"
-        name = detail.get("name") or detail.get("airline") or "알 수 없음"
-        ref = r.get("external_ref_id") or "없음"
-        price_str = f"{int(r['total_price']):,} {r['currency']}" if r.get("total_price") else "가격정보없음"
-        if r.get("type") == "flight":
-            dep = detail.get("departure", "")
-            arr = detail.get("arrival", "")
-            dep_at = (detail.get("departing_at") or "")[:10]
-            lines.append(f"{i}. [{rtype_str}] {name} {dep}→{arr} ({dep_at}) | 예약번호: {ref} | {price_str}")
-        else:
-            check_in = detail.get("check_in", "")
-            check_out = detail.get("check_out", "")
-            lines.append(f"{i}. [{rtype_str}] {name} ({check_in}~{check_out}) | 예약번호: {ref} | {price_str}")
-    lines.append("\n어떤 항목을 취소해드릴까요? 시스템 특성상 한 번에 하나씩만 처리할 수 있어요 😊")
-    return "\n".join(lines)
-
-
-def _user_targets_cancel_item(user_msg: str, reservations: list[dict]) -> bool:
-    """사용자 메시지가 특정 예약을 지목하는지 확인."""
-    return _select_cancel_reservation(user_msg, reservations) is not None
-
-
-def _select_cancel_reservation(user_msg: str, reservations: list[dict]) -> dict | None:
-    """사용자 메시지에서 지목된 취소 대상 예약을 찾는다."""
-    lower = user_msg.lower()
-
-    # "N번" 번호 선택
-    number_match = re.search(r'(?:^|\s)(\d+)\s*번', lower)
-    if number_match:
-        index = int(number_match.group(1)) - 1
-        if 0 <= index < len(reservations):
-            return reservations[index]
-
-    # "첫 번째", "두 번째", "세 번째" 순서 선택
-    ordinal_match = re.search(r'(첫|두|세)\s*번째', lower)
-    if ordinal_match:
-        index = _ORDINAL_INDEX[ordinal_match.group(1)]
-        if 0 <= index < len(reservations):
-            return reservations[index]
-
-    # IATA 코드 (예: "ICN→NRT 취소해줘")
-    iata_codes = set(_IATA_RE.findall(user_msg))
-    if iata_codes:
-        for r in reservations:
-            detail = r.get("detail") or {}
-            reservation_codes = {
-                str(detail.get("departure") or "").upper(),
-                str(detail.get("arrival") or "").upper(),
-            }
-            if iata_codes & reservation_codes:
-                return r
-
-    # 예약명·항공사명·예약번호 매칭
-    for r in reservations:
-        detail = r.get("detail") or {}
-        identifiers = [
-            detail.get("name") or "",
-            detail.get("airline") or "",
-            r.get("external_ref_id") or "",
-        ]
-        for ident in identifiers:
-            if ident and len(ident) >= 3 and ident.lower() in lower:
-                return r
-    return None
-
-
-def _build_cancel_done_message(reservation: dict) -> str:
-    """선택된 예약에 대한 취소 요청 메시지를 생성한다."""
-    detail = reservation.get("detail") or {}
-    ref = reservation.get("external_ref_id") or reservation.get("id") or "알 수 없음"
-    if reservation.get("type") == "flight":
-        name = detail.get("airline") or "항공편"
-        dep = detail.get("departure", "")
-        arr = detail.get("arrival", "")
-        route = f" {dep}→{arr}" if dep or arr else ""
-        return f"{name}{route} 예약 취소 요청을 접수했습니다. 예약번호: {ref}"
-
-    name = detail.get("name") or "숙소"
-    return f"{name} 예약 취소 요청을 접수했습니다. 예약번호: {ref}"
-
-
 def _has_any_keyword(user_message: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in user_message for keyword in keywords)
 
@@ -246,18 +151,19 @@ def _correct_request_type(request_type: str, user_message: str, current_itinerar
     return request_type
 
 
+_CANCEL_GUIDANCE_MESSAGE = (
+    "예약 취소는 예약을 진행하신 항공사·숙소 또는 예약 사이트에서 직접 진행하셔야 해요. "
+    "취소 규정과 수수료는 예약처에서 확인하실 수 있습니다."
+)
+
+
 def _get_cancel_intercept_message(user_message: str, reservations: list[dict]) -> str | None:
     """
-    cancel 요청을 선처리.
-    - 예약 없음 → 안내 메시지 반환
-    - 막연한 취소 요청 → 목록 반환
-    - 특정 항목 지목 → None (직접 cancel payload 생성)
+    cancel 요청 선처리.
+    이 서비스는 예약을 직접 취소하지 않으므로(Booking은 조회·딥링크 전용), 예약 유무와 무관하게
+    항상 '예약처에서 직접 취소' 안내로 응답한다. → LLM 호출·cancel payload 생성 없음.
     """
-    if not reservations:
-        return "취소할 수 있는 예약 내역이 없어요."
-    if _user_targets_cancel_item(user_message, reservations):
-        return None
-    return _build_cancel_list_message(reservations)
+    return _CANCEL_GUIDANCE_MESSAGE
 
 
 def _sse(event: str, payload: dict) -> str:
@@ -427,63 +333,31 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
         flush=True,
     )
 
-    # [3.5] cancel 막연한 요청 선처리 — 오케스트레이터 호출 전 가로채기
+    # [3.5] cancel 선처리 — 이 서비스는 예약을 직접 취소하지 않으므로(Booking은 조회·딥링크 전용),
+    #        예약 유무·지목과 무관하게 항상 '예약처에서 직접 취소' 안내로 응답한다(cancel payload 미생성).
     if request_type == "cancel":
-        reservations = ctx.get("reservations", [])
-        selected_cancel = _select_cancel_reservation(user_message, reservations)
-        if selected_cancel is not None:
-            response_msg = _build_cancel_done_message(selected_cancel)
-            print(f"[_stream] cancel 직접 payload 생성: {selected_cancel.get('id')!r}", flush=True)
-            yield _sse("chunk", {"content": response_msg})
-            try:
-                assistant_embedding = await get_user_embedding(response_msg)
-            except Exception:
-                assistant_embedding = None
-            done = _build_done_event(
-                request_type="cancel",
-                user_message=user_message,
-                user_embedding=ctx["user_embedding"],
-                full_response=response_msg,
-                assistant_embedding=assistant_embedding,
-                orch_result=OrchestratorResult(
-                    message=response_msg,
-                    cancel=CancelFields(
-                        reservation_id=selected_cancel.get("id") or selected_cancel.get("external_ref_id") or "",
-                        cancelled_at=datetime.now().astimezone().isoformat(),
-                    ),
-                ),
-                merged_summary=ctx["ai_summary"],
-                merged_prefs=ctx["preferences"],
-            )
-            if hide_embedding:
-                done.userMessage.embedding = None
-                done.assistantMessage.embedding = None
-            yield _sse("done", _exclude_none(done.model_dump(), keep_null_keys=frozenset({"amount_krw"})))
-            return
-
-        intercept_msg = _get_cancel_intercept_message(user_message, reservations)
-        if intercept_msg is not None:
-            print(f"[_stream] cancel 선처리 인터셉트: {intercept_msg[:60]!r}", flush=True)
-            yield _sse("chunk", {"content": intercept_msg})
-            try:
-                assistant_embedding = await get_user_embedding(intercept_msg)
-            except Exception:
-                assistant_embedding = None
-            done = _build_done_event(
-                request_type="chat",
-                user_message=user_message,
-                user_embedding=ctx["user_embedding"],
-                full_response=intercept_msg,
-                assistant_embedding=assistant_embedding,
-                orch_result=OrchestratorResult(message=intercept_msg),
-                merged_summary=ctx["ai_summary"],
-                merged_prefs=ctx["preferences"],
-            )
-            if hide_embedding:
-                done.userMessage.embedding = None
-                done.assistantMessage.embedding = None
-            yield _sse("done", _exclude_none(done.model_dump(), keep_null_keys=frozenset({"amount_krw"})))
-            return
+        intercept_msg = _get_cancel_intercept_message(user_message, ctx.get("reservations", []))
+        print(f"[_stream] cancel 선처리 인터셉트: {intercept_msg[:60]!r}", flush=True)
+        yield _sse("chunk", {"content": intercept_msg})
+        try:
+            assistant_embedding = await get_user_embedding(intercept_msg)
+        except Exception:
+            assistant_embedding = None
+        done = _build_done_event(
+            request_type="chat",
+            user_message=user_message,
+            user_embedding=ctx["user_embedding"],
+            full_response=intercept_msg,
+            assistant_embedding=assistant_embedding,
+            orch_result=OrchestratorResult(message=intercept_msg),
+            merged_summary=ctx["ai_summary"],
+            merged_prefs=ctx["preferences"],
+        )
+        if hide_embedding:
+            done.userMessage.embedding = None
+            done.assistantMessage.embedding = None
+        yield _sse("done", _exclude_none(done.model_dump(), keep_null_keys=frozenset({"amount_krw"})))
+        return
 
     # [4] 에이전트 실행 — itinerary는 파이프라인, 그 외는 오케스트레이터 실시간 스트리밍
     print(f"\n[_stream] [4] 에이전트 실행 시작. request_type={request_type}", flush=True)

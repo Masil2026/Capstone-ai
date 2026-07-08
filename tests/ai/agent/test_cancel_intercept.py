@@ -1,15 +1,13 @@
 """
 cancel 선처리(pre-check) 테스트
 
-순수 헬퍼 함수(단위 테스트) + 엔드포인트(Mock 통합 테스트).
+이 서비스는 예약을 직접 취소하지 않는다(Booking은 조회·딥링크 전용).
+따라서 cancel 요청은 예약 유무·지목과 무관하게 항상 '예약처에서 직접 취소' 안내로 응답하며,
+오케스트레이터를 호출하지 않고 cancel payload도 생성하지 않는다(done type은 chat).
 
 검증 항목:
-  - _build_cancel_list_message : 항공/숙소 포맷 확인
-  - _user_targets_cancel_item  : 번호/IATA/이름/예약번호로 특정 항목 지목 감지
-  - _get_cancel_intercept_message : 예약 없음 / 막연한 요청 / 특정 지목 분기
-  - 엔드포인트: 예약 없음       → type=chat, "예약 내역이 없어요", 오케스트레이터 미호출
-  - 엔드포인트: 막연한 취소     → type=chat, 목록 반환, 오케스트레이터 미호출
-  - 엔드포인트: 특정 항목 지목  → 오케스트레이터에 위임
+  - _get_cancel_intercept_message : 입력과 무관하게 항상 동일한 안내 메시지 반환
+  - 엔드포인트: 예약 없음 / 예약 있음 / 특정 항목 지목 → 모두 type=chat 안내, 오케스트레이터 미호출
 
 실행:
   pytest tests/ai/agent/test_cancel_intercept.py -s
@@ -21,9 +19,8 @@ import httpx
 import pytest
 
 from app.controller.aiMessageController import (
-    _build_cancel_list_message,
+    _CANCEL_GUIDANCE_MESSAGE,
     _get_cancel_intercept_message,
-    _user_targets_cancel_item,
 )
 from app.core.config import settings
 # ── 공통 픽스처 ────────────────────────────────────────────────────────────────
@@ -139,228 +136,81 @@ def _print_done(name: str, done: dict):
     print(f"{'='*65}\n")
 
 
-# ── 단위 테스트: _build_cancel_list_message ────────────────────────────────────
-
-class TestBuildCancelListMessage:
-    def test_항공_포맷(self):
-        msg = _build_cancel_list_message([_FLIGHT_RES])
-        assert "1. [항공] 대한항공 ICN→NRT (2026-06-01) | 예약번호: ABC123 | 450,000 KRW" in msg
-
-    def test_숙소_포맷(self):
-        msg = _build_cancel_list_message([_HOTEL_RES])
-        assert "1. [숙소] 롯데호텔 도쿄 (2026-06-01~2026-06-03) | 예약번호: XYZ789 | 320,000 KRW" in msg
-
-    def test_항공_숙소_순서(self):
-        msg = _build_cancel_list_message(_RESERVATIONS)
-        assert "1. [항공]" in msg
-        assert "2. [숙소]" in msg
-
-    def test_헤더_및_질문_포함(self):
-        msg = _build_cancel_list_message(_RESERVATIONS)
-        assert "현재 예약 내역입니다" in msg
-        assert "어떤 항목을 취소해드릴까요?" in msg
-        assert "한 번에 하나씩" in msg
-
-    def test_가격_없는_예약(self):
-        res = {**_FLIGHT_RES, "total_price": None}
-        msg = _build_cancel_list_message([res])
-        assert "가격정보없음" in msg
-
-    def test_예약번호_없는_예약(self):
-        res = {**_HOTEL_RES, "external_ref_id": None}
-        msg = _build_cancel_list_message([res])
-        assert "예약번호: 없음" in msg
-
-
-# ── 단위 테스트: _user_targets_cancel_item ────────────────────────────────────
-
-class TestUserTargetsCancelItem:
-    def test_숫자_번호_지목(self):
-        assert _user_targets_cancel_item("1번 취소해줘", _RESERVATIONS) is True
-
-    def test_첫번째_지목(self):
-        assert _user_targets_cancel_item("첫 번째 취소해줘", _RESERVATIONS) is True
-
-    def test_두번째_지목(self):
-        assert _user_targets_cancel_item("두 번째 취소해줘", _RESERVATIONS) is True
-
-    def test_세번째_지목(self):
-        assert _user_targets_cancel_item("세 번째 거 취소", _RESERVATIONS) is False
-
-    def test_IATA_코드_지목(self):
-        assert _user_targets_cancel_item("ICN 출발 항공편 취소", _RESERVATIONS) is True
-
-    def test_항공사명_지목(self):
-        assert _user_targets_cancel_item("대한항공 취소해줘", _RESERVATIONS) is True
-
-    def test_숙소명_지목(self):
-        assert _user_targets_cancel_item("롯데호텔 도쿄 취소해줘", _RESERVATIONS) is True
-
-    def test_예약번호_지목(self):
-        assert _user_targets_cancel_item("ABC123 취소해줘", _RESERVATIONS) is True
-
-    def test_막연한_요청_False(self):
-        assert _user_targets_cancel_item("취소해줘", _RESERVATIONS) is False
-
-    def test_전부_취소_False(self):
-        assert _user_targets_cancel_item("전부 취소해줘", _RESERVATIONS) is False
-
-    def test_모두_취소_False(self):
-        assert _user_targets_cancel_item("다 취소해줘", _RESERVATIONS) is False
-
-    def test_번호_지목_예약목록_무관(self):
-        # 직접 payload를 만들려면 실제 예약 객체를 선택할 수 있어야 한다.
-        assert _user_targets_cancel_item("1번 취소해줘", []) is False
-
-    def test_짧은_식별자_무시(self):
-        # 2글자 이하 identifier는 매칭하지 않음
-        short_res = {**_FLIGHT_RES, "external_ref_id": "AB"}
-        assert _user_targets_cancel_item("AB 취소", [short_res]) is False
-
-
 # ── 단위 테스트: _get_cancel_intercept_message ────────────────────────────────
+# 입력(예약 유무·지목 여부)과 무관하게 항상 동일한 '직접 취소' 안내를 반환해야 한다.
 
-class TestGetCancelInterceptMessage:
-    def test_예약_없음_안내_반환(self):
-        msg = _get_cancel_intercept_message("취소해줘", [])
-        assert msg == "취소할 수 있는 예약 내역이 없어요."
+class TestCancelInterceptMessage:
+    def test_예약_없음도_안내_메시지(self):
+        assert _get_cancel_intercept_message("취소해줘", []) == _CANCEL_GUIDANCE_MESSAGE
 
-    def test_막연한_요청_목록_반환(self):
-        msg = _get_cancel_intercept_message("취소해줘", _RESERVATIONS)
-        assert msg is not None
-        assert "현재 예약 내역입니다" in msg
+    def test_예약_있어도_안내_메시지(self):
+        assert _get_cancel_intercept_message("취소해줘", _RESERVATIONS) == _CANCEL_GUIDANCE_MESSAGE
 
-    def test_특정_번호_지목_None_반환(self):
-        msg = _get_cancel_intercept_message("1번 취소해줘", _RESERVATIONS)
-        assert msg is None
+    def test_특정_항목_지목해도_안내_메시지(self):
+        assert _get_cancel_intercept_message("1번 취소해줘", _RESERVATIONS) == _CANCEL_GUIDANCE_MESSAGE
+        assert _get_cancel_intercept_message("롯데호텔 도쿄 취소해줘", _RESERVATIONS) == _CANCEL_GUIDANCE_MESSAGE
 
-    def test_특정_IATA_지목_None_반환(self):
-        msg = _get_cancel_intercept_message("ICN→NRT 항공편 취소해줘", _RESERVATIONS)
-        assert msg is None
-
-    def test_특정_이름_지목_None_반환(self):
-        msg = _get_cancel_intercept_message("롯데호텔 도쿄 취소해줘", _RESERVATIONS)
-        assert msg is None
-
-    def test_특정_예약번호_지목_None_반환(self):
-        msg = _get_cancel_intercept_message("ABC123 취소해줘", _RESERVATIONS)
-        assert msg is None
+    def test_안내_문구_내용(self):
+        assert "직접" in _CANCEL_GUIDANCE_MESSAGE
+        assert "예약처" in _CANCEL_GUIDANCE_MESSAGE
 
 
 # ── 엔드포인트 통합 Mock 테스트 ───────────────────────────────────────────────
+# 모든 cancel 요청은 type=chat 안내로 응답하고 오케스트레이터를 호출하지 않는다.
 
-@pytest.mark.asyncio
-async def test_cancel_no_reservations_returns_chat_without_orchestrator():
-    """예약 없음 → type=chat '없어요' 메시지, 오케스트레이터 미호출"""
-    ctx = _make_ctx(reservations=[])
-
+async def _run_cancel(content: str, reservations: list[dict]) -> dict:
+    ctx = _make_ctx(reservations=reservations)
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls, \
          patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
          patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)):
 
         mock_cls.run = AsyncMock(return_value=_mock_cls("cancel"))
-        events = await _call_endpoint("취소해줘")
+        events = await _call_endpoint(content)
 
     _assert_no_error(events)
     done = _done(events)
-    _print_done("cancel_no_reservations", done)
+    _print_done(content, done)
 
     assert done["type"] == "chat"
-    assert "없어요" in done["assistantMessage"]["content"]
+    assert done["assistantMessage"]["content"] == _CANCEL_GUIDANCE_MESSAGE
+    assert done.get("cancel") is None
     mock_orch.run_stream.assert_not_called()
+    return done
 
 
 @pytest.mark.asyncio
-async def test_cancel_vague_returns_list_without_orchestrator():
-    """막연한 취소 요청 → type=chat 예약 목록 반환, 오케스트레이터 미호출"""
-    ctx = _make_ctx(reservations=_RESERVATIONS)
-
-    with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
-         patch("app.controller.aiMessageController.classification_agent") as mock_cls, \
-         patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
-         patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)):
-
-        mock_cls.run = AsyncMock(return_value=_mock_cls("cancel"))
-        events = await _call_endpoint("취소해줘")
-
-    _assert_no_error(events)
-    done = _done(events)
-    _print_done("cancel_vague", done)
-
-    assert done["type"] == "chat"
-    content = done["assistantMessage"]["content"]
-    assert "현재 예약 내역입니다" in content
-    assert "대한항공" in content
-    assert "롯데호텔 도쿄" in content
-    assert "어떤 항목을 취소해드릴까요?" in content
-    mock_orch.run_stream.assert_not_called()
+async def test_cancel_no_reservations_returns_guidance():
+    """예약 없음 → type=chat 직접 취소 안내, 오케스트레이터 미호출"""
+    await _run_cancel("취소해줘", [])
 
 
 @pytest.mark.asyncio
-async def test_cancel_vague_emits_chunk_before_done():
-    """막연한 취소 → chunk 이벤트가 done 이전에 전송됨"""
-    ctx = _make_ctx(reservations=_RESERVATIONS)
+async def test_cancel_with_reservations_returns_guidance():
+    """예약 있어도 → type=chat 직접 취소 안내 (가짜 목록/취소 없음)"""
+    await _run_cancel("취소해줘", _RESERVATIONS)
 
+
+@pytest.mark.asyncio
+async def test_cancel_specific_item_returns_guidance():
+    """특정 항목 지목해도 → type=chat 직접 취소 안내 (cancel payload 미생성)"""
+    await _run_cancel("1번 취소해줘", _RESERVATIONS)
+
+
+@pytest.mark.asyncio
+async def test_cancel_emits_chunk_before_done():
+    """cancel → chunk 이벤트가 done 이전에 전송됨"""
+    ctx = _make_ctx(reservations=_RESERVATIONS)
     with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
          patch("app.controller.aiMessageController.classification_agent") as mock_cls, \
          patch("app.controller.aiMessageController.orchestrator_agent"), \
          patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)):
 
         mock_cls.run = AsyncMock(return_value=_mock_cls("cancel"))
-        events = await _call_endpoint("전부 취소해줘")
+        events = await _call_endpoint("취소해줘")
 
     event_names = [e["event"] for e in events]
     assert "chunk" in event_names, "chunk 이벤트 없음"
     assert event_names.index("chunk") < event_names.index("done"), "chunk이 done보다 먼저여야 함"
-
-    chunk_contents = [e["data"]["content"] for e in events if e["event"] == "chunk"]
-    combined = "".join(chunk_contents)
-    assert "현재 예약 내역입니다" in combined
-
-
-@pytest.mark.asyncio
-async def test_cancel_specific_item_builds_payload_without_orchestrator():
-    """특정 항목 지목 → 오케스트레이터 호출 없이 cancel payload 직접 생성"""
-    ctx = _make_ctx(reservations=_RESERVATIONS)
-
-    with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
-         patch("app.controller.aiMessageController.classification_agent") as mock_cls, \
-         patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
-         patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
-         patch("app.controller.aiMessageController.save_memory"):
-
-        mock_cls.run = AsyncMock(return_value=_mock_cls("cancel"))
-        events = await _call_endpoint("1번 취소해줘")
-
-    _assert_no_error(events)
-    done = _done(events)
-    _print_done("cancel_specific_by_number", done)
-
-    assert done["type"] == "cancel"
-    assert done["cancel"]["reservationId"] == "res-flight-uuid-001"
-    assert "취소" in done["assistantMessage"]["content"]
-    mock_orch.run_stream.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_cancel_specific_by_name_builds_payload_without_orchestrator():
-    """숙소명으로 특정 항목 지목 → 오케스트레이터 호출 없이 cancel payload 직접 생성"""
-    ctx = _make_ctx(reservations=_RESERVATIONS)
-
-    with patch("app.controller.aiMessageController.load_context", new=AsyncMock(return_value=ctx)), \
-         patch("app.controller.aiMessageController.classification_agent") as mock_cls, \
-         patch("app.controller.aiMessageController.orchestrator_agent") as mock_orch, \
-         patch("app.controller.aiMessageController.get_user_embedding", new=AsyncMock(return_value=_FIXED_EMBEDDING)), \
-         patch("app.controller.aiMessageController.save_memory"):
-
-        mock_cls.run = AsyncMock(return_value=_mock_cls("cancel"))
-        events = await _call_endpoint("롯데호텔 도쿄 취소해줘")
-
-    _assert_no_error(events)
-    done = _done(events)
-    _print_done("cancel_specific_by_name", done)
-
-    assert done["type"] == "cancel"
-    assert done["cancel"]["reservationId"] == "res-hotel-uuid-002"
-    mock_orch.run_stream.assert_not_called()
+    combined = "".join(e["data"]["content"] for e in events if e["event"] == "chunk")
+    assert combined == _CANCEL_GUIDANCE_MESSAGE
