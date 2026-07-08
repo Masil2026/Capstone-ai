@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     PORT: int
     JAVA_BACKEND_URL: str
 
-    # --- Duffel API ---
+    # --- Duffel API (참고용/legacy — 현재 항공·숙소는 Booking으로 대체, FlightAdapter·AccommodationAdapter 전용) ---
     DUFFEL_API_KEY: str
 
     # --- Tavily Search API ---

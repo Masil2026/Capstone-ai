@@ -1,3 +1,6 @@
+# ⚠️ 참고용(legacy) 어댑터 — 현재 항공 검색은 BookingAdapter(tool_name="booking")로 대체됨.
+#    itinerary_pipeline의 _service에는 등록되어 있지 않다(런타임 미사용).
+#    Duffel Air API 연동 예시로 남겨두며, 삭제하지 말 것.
 import re
 import httpx
 from app.core.ApiToolsInterfaces import ApiTools
