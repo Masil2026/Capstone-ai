@@ -29,6 +29,8 @@ class DayPlanItem(BaseModel):
     place: str
     note: str = ""
     cost: ItemCost | None = None  # 전체 금액 (항공: 탑승객 전원, 숙소: 전체 숙박, 식사/교통: 전체 인원). 무료이면 null
+    image_url: str | None = None  # 대표 이미지 (한국관광공사 firstimage/Booking 사진/항공사 로고). 파이프라인 후처리로 주입
+    url: str | None = None        # 예약/상세 링크 (Booking 호텔·항공). 파이프라인 후처리로 주입
 
     @field_validator("note", mode="before")
     @classmethod
