@@ -134,9 +134,7 @@ async def test_flight_patch_only_calls_duffel_flight_lookup():
         },
     }
 
-    async def mock_task(tool_name, action, params):
-        assert tool_name == "duffel_flight"
-        assert action == "search_flights"
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
         return {
             "status": "success",
             "data": [
@@ -155,7 +153,7 @@ async def test_flight_patch_only_calls_duffel_flight_lookup():
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)) as mocked:
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)) as mocked:
         result = await try_patch_itinerary_item(_deps(itinerary), "항공편 다른 걸로 바꿔줘")
 
     assert result is not None
@@ -191,9 +189,7 @@ async def test_flight_patch_ignores_airport_transfer_items():
         },
     }
 
-    async def mock_task(tool_name, action, params):
-        assert tool_name == "duffel_flight"
-        assert action == "search_flights"
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
         return {
             "status": "success",
             "data": [
@@ -212,7 +208,7 @@ async def test_flight_patch_ignores_airport_transfer_items():
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)) as mocked:
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)) as mocked:
         result = await try_patch_itinerary_item(_deps(itinerary), "인천으로 오는 항공 저녁시간으로 바꿔줘")
 
     assert result is not None
@@ -254,9 +250,7 @@ async def test_return_flight_patch_syncs_next_day_arrival_and_transfer():
         },
     }
 
-    async def mock_task(tool_name, action, params):
-        assert tool_name == "duffel_flight"
-        assert action == "search_flights"
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
         return {
             "status": "success",
             "data": [
@@ -275,7 +269,7 @@ async def test_return_flight_patch_syncs_next_day_arrival_and_transfer():
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "인천으로 오는 항공 저녁시간으로 바꿔줘")
 
     assert result is not None
@@ -310,9 +304,9 @@ async def test_return_flight_patch_searches_both_dates_and_filters_by_end_date()
     }
     call_dates = []
 
-    async def mock_task(tool_name, action, params):
-        call_dates.append(params["departure_date"])
-        if params["departure_date"] == "2026-05-30":
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
+        call_dates.append(depart_date)
+        if depart_date == "2026-05-30":
             return {
                 "status": "success",
                 "data": [
@@ -349,7 +343,7 @@ async def test_return_flight_patch_searches_both_dates_and_filters_by_end_date()
                 ],
             }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)) as mocked:
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)) as mocked:
         result = await try_patch_itinerary_item(_deps(itinerary), "귀국 항공 바꿔줘")
 
     assert result is not None
@@ -384,7 +378,7 @@ async def test_non_return_flight_patch_searches_single_date():
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
         return {
             "status": "success",
             "data": [
@@ -403,7 +397,7 @@ async def test_non_return_flight_patch_searches_single_date():
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)) as mocked:
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)) as mocked:
         result = await try_patch_itinerary_item(_deps(itinerary), "출발 항공편 바꿔줘")
 
     assert result is not None
@@ -431,7 +425,7 @@ async def test_named_flight_patch_asks_confirmation_when_candidate_unmatched():
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
         return {
             "status": "success",
             "data": [
@@ -450,7 +444,7 @@ async def test_named_flight_patch_asks_confirmation_when_candidate_unmatched():
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "대한항공으로 바꿔줘")
 
     assert result is not None
@@ -481,9 +475,7 @@ async def test_hotel_patch_only_calls_duffel_accommodation_lookup():
         },
     }
 
-    async def mock_task(tool_name, action, params):
-        assert tool_name == "duffel_accommodation"
-        assert action == "search_hotels"
+    async def mock_search(itinerary_arg, city, check_in, check_out):
         return {
             "status": "success",
             "data": [
@@ -498,7 +490,7 @@ async def test_hotel_patch_only_calls_duffel_accommodation_lookup():
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)) as mocked:
+    with patch.object(itinerary_patch, "_search_hotels_with_city_fallbacks", new=AsyncMock(side_effect=mock_search)) as mocked:
         result = await try_patch_itinerary_item(_deps(itinerary), "호텔 다른 곳으로 바꿔줘")
 
     assert result is not None
@@ -530,7 +522,7 @@ async def test_other_hotel_request_is_not_treated_as_named_hotel():
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(itinerary_arg, city, check_in, check_out):
         return {
             "status": "success",
             "data": [
@@ -539,8 +531,7 @@ async def test_other_hotel_request_is_not_treated_as_named_hotel():
             ],
         }
 
-    with patch.object(itinerary_patch, "_extract_english_city", new=AsyncMock(return_value="Jeju")), \
-         patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_search_hotels_with_city_fallbacks", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "다른 숙소로 바꿔줘")
 
     assert result is not None
@@ -570,7 +561,7 @@ async def test_flight_patch_filters_afternoon_offers():
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
         return {
             "status": "success",
             "data": [
@@ -613,7 +604,7 @@ async def test_flight_patch_filters_afternoon_offers():
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "인천으로 오는 항공 오후 시간으로 바꿔줘")
 
     assert result is not None
@@ -645,7 +636,7 @@ async def test_flight_patch_asks_confirmation_when_no_offers_match_time_preferen
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
         return {
             "status": "success",
             "data": [
@@ -676,7 +667,7 @@ async def test_flight_patch_asks_confirmation_when_no_offers_match_time_preferen
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "항공 오전 시간으로 바꿔줘")
 
     assert result is not None
@@ -722,7 +713,7 @@ async def test_flight_patch_removes_orphaned_pre_departure_arrival_airport_item(
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(origin, dest, depart_date, adults, child_ages):
         return {
             "status": "success",
             "data": [
@@ -741,7 +732,7 @@ async def test_flight_patch_removes_orphaned_pre_departure_arrival_airport_item(
             ],
         }
 
-    with patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_booking_flight_search", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "항공 바꿔줘")
 
     assert result is not None
@@ -778,7 +769,7 @@ async def test_other_hotel_request_excludes_current_named_hotel():
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(itinerary_arg, city, check_in, check_out):
         return {
             "status": "success",
             "data": [
@@ -787,8 +778,7 @@ async def test_other_hotel_request_excludes_current_named_hotel():
             ],
         }
 
-    with patch.object(itinerary_patch, "_extract_english_city", new=AsyncMock(return_value="Jeju")), \
-         patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_search_hotels_with_city_fallbacks", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "Hotel Leo 말고 다른 숙소로 바꿔줘")
 
     assert result is not None
@@ -816,10 +806,8 @@ async def test_hotel_patch_normalizes_korean_country_city_before_lookup():
     }
     seen_city_names = []
 
-    async def mock_task(tool_name, action, params):
-        seen_city_names.append(params["city_name"])
-        assert tool_name == "duffel_accommodation"
-        assert action == "search_hotels"
+    async def mock_search(city_name, check_in, check_out, adults, children, child_ages):
+        seen_city_names.append(city_name)
         return {
             "status": "success",
             "data": [
@@ -835,7 +823,7 @@ async def test_hotel_patch_normalizes_korean_country_city_before_lookup():
         }
 
     with patch.object(itinerary_patch, "_extract_english_city", new=AsyncMock(return_value="Busan")), \
-         patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+         patch.object(itinerary_patch, "_fetch_hotels", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "저렴한 숙소로 바꿔줘")
 
     assert result is not None
@@ -863,7 +851,7 @@ async def test_hotel_quality_request_selects_highest_rated_candidate():
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(itinerary_arg, city, check_in, check_out):
         return {
             "status": "success",
             "data": [
@@ -872,8 +860,7 @@ async def test_hotel_quality_request_selects_highest_rated_candidate():
             ],
         }
 
-    with patch.object(itinerary_patch, "_extract_english_city", new=AsyncMock(return_value="Jeju")), \
-         patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_search_hotels_with_city_fallbacks", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "시설 좋은 호텔로 바꿔줘")
 
     assert result is not None
@@ -921,8 +908,8 @@ async def test_hotel_patch_updates_related_airport_to_hotel_transfer():
         },
     }
 
-    async def mock_task(tool_name, action, params):
-        assert params["city_name"] == "Jeju"
+    async def mock_search(city_name, check_in, check_out, adults, children, child_ages):
+        assert city_name == "Jeju"
         return {
             "status": "success",
             "data": [
@@ -938,7 +925,7 @@ async def test_hotel_patch_updates_related_airport_to_hotel_transfer():
         }
 
     with patch.object(itinerary_patch, "_extract_english_city", new=AsyncMock(return_value="Jeju")), \
-         patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+         patch.object(itinerary_patch, "_fetch_hotels", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "저렴한 숙소로 바꿔줘")
 
     assert result is not None
@@ -997,7 +984,7 @@ async def test_named_hotel_patch_asks_confirmation_when_candidate_unmatched():
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(itinerary_arg, city, check_in, check_out):
         return {
             "status": "success",
             "data": [
@@ -1012,8 +999,7 @@ async def test_named_hotel_patch_asks_confirmation_when_candidate_unmatched():
             ],
         }
 
-    with patch.object(itinerary_patch, "_extract_english_city", new=AsyncMock(return_value="Jeju")), \
-         patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)):
+    with patch.object(itinerary_patch, "_search_hotels_with_city_fallbacks", new=AsyncMock(side_effect=mock_search)):
         result = await try_patch_itinerary_item(_deps(itinerary), "신라호텔로 바꿔줘")
 
     assert result is not None
@@ -1043,11 +1029,10 @@ async def test_hotel_patch_does_local_patch_when_lookup_fails():
         },
     }
 
-    async def mock_task(tool_name, action, params):
+    async def mock_search(itinerary_arg, city, check_in, check_out):
         return {"status": "error", "message": [{"code": "invalid_date"}]}
 
-    with patch.object(itinerary_patch, "_extract_english_city", new=AsyncMock(return_value="Busan")), \
-         patch.object(itinerary_patch._service, "process_task", new=AsyncMock(side_effect=mock_task)) as mocked:
+    with patch.object(itinerary_patch, "_search_hotels_with_city_fallbacks", new=AsyncMock(side_effect=mock_search)) as mocked:
         result = await try_patch_itinerary_item(_deps(itinerary), "저렴한 숙소로 바꿔줘")
 
     assert result is not None

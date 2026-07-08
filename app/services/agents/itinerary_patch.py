@@ -8,18 +8,38 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.schemas.ai_message import DayPlanItem, ItemCost, OrchestratorResult
-from app.services.adapters.accommodation_api import AccommodationAdapter
-from app.services.adapters.flight_api import FlightAdapter
+from app.services.adapters.booking_api import BookingAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
-from app.services.agents.itinerary_pipeline import _extract_english_city
+from app.services.agents.itinerary_pipeline import (
+    _extract_english_city,
+    _fetch_hotels,
+    _normalize_booking_flights,
+    _normalize_booking_hotels,
+)
 from app.services.travel_agent_service import TravelAgentService
 
 
 _service = TravelAgentService({
-    "duffel_flight": FlightAdapter(),
-    "duffel_accommodation": AccommodationAdapter(),
+    "booking": BookingAdapter(),
     "google_maps": GoogleMapsAdapter(),
 })
+
+
+async def _booking_flight_search(
+    origin_iata: str, dest_iata: str, depart_date: str, adults: int, child_ages: list,
+) -> dict:
+    """PATCH용 Booking 항공 검색. 기존 아이템에서 IATA를 이미 알므로 위치해석 없이 {IATA}.AIRPORT 조립."""
+    query = {
+        "fromId": f"{origin_iata}.AIRPORT",
+        "toId": f"{dest_iata}.AIRPORT",
+        "departDate": depart_date,
+        "adults": adults,
+    }
+    csv = ",".join(str(a) for a in (child_ages or []))
+    if csv:
+        query["children"] = csv
+    raw = await _service.process_task("booking", "search_flights", query)
+    return _normalize_booking_flights(raw)
 
 _CHANGE_WORDS = ("바꿔", "바꿀", "변경", "수정", "교체", "다른", "새로", "말고", "대신", "타고", "이용", "먹고", "먹을", "먹자", "추가", "넣어", "싶어", "싶은")
 _TRANSPORT_TERMS = (
@@ -644,38 +664,27 @@ async def _patch_flight(deps: Any, user_message: str) -> OrchestratorResult | No
         end_date is not None
         and date_key >= str(date.fromisoformat(end_date) - timedelta(days=1))
     )
-    common_params = {
-        "origin": origin,
-        "destination": destination,
-        "adults": deps.current_itinerary.get("adult_count") or 1,
-        "children": deps.current_itinerary.get("child_count") or 0,
-        "child_ages": deps.current_itinerary.get("child_ages") or [],
-    }
+    adults = deps.current_itinerary.get("adult_count") or 1
+    child_ages = deps.current_itinerary.get("child_ages") or []
 
     if is_return and end_date:
         # 파이프라인과 동일: end_date + end_date-1 양쪽 검색 후 합산, arriving_at <= end_date 필터
         end_dt = date.fromisoformat(end_date)
         r_cur, r_prev = await asyncio.gather(
-            _service.process_task("duffel_flight", "search_flights", {
-                **common_params, "departure_date": end_date,
-            }),
-            _service.process_task("duffel_flight", "search_flights", {
-                **common_params, "departure_date": str(end_dt - timedelta(days=1)),
-            }),
+            _booking_flight_search(origin, destination, end_date, adults, child_ages),
+            _booking_flight_search(origin, destination, str(end_dt - timedelta(days=1)), adults, child_ages),
         )
         merged: list[dict] = []
         for r in (r_cur, r_prev):
             if r.get("status") == "success":
                 merged.extend(r.get("data") or [])
-        offers = [f for f in merged if f.get("arriving_at", "")[:10] <= end_date]
+        offers = [f for f in merged if (f.get("arriving_at") or "")[:10] <= end_date]
         if not offers:
             print(f"[itinerary_patch] 귀국편 end_date({end_date}) 이내 도착편 없음 — 전체 결과 사용", flush=True)
             offers = merged
     else:
-        result = await _service.process_task("duffel_flight", "search_flights", {
-            **common_params, "departure_date": date_key,
-        })
-        offers = (result.get("data") or []) if result.get("status") == "success" else []
+        result = await _booking_flight_search(origin, destination, date_key, adults, child_ages)
+        offers = result.get("data") or []
 
     requested_airline = _extract_requested_airline(user_message)
     if not offers:
@@ -715,6 +724,8 @@ async def _patch_flight(deps: Any, user_message: str) -> OrchestratorResult | No
     patched["place"] = f"{offer['origin']} → {offer['destination']}"
     patched["note"] = f"비행시간 {offer.get('duration', '?')} | {'직항' if offer.get('stops', 0) == 0 else str(offer.get('stops')) + '회 경유'}"
     patched["cost"] = _cost_from_amount(offer.get("price_original"), offer.get("currency"), offer.get("price_krw"))
+    patched["image_url"] = offer.get("image_url")  # 항공사 로고
+    patched["url"] = offer.get("url")              # Booking 검색 리스트 URL
 
     if depart_dt and arrive_dt and depart_dt.date() != arrive_dt.date():
         patched["time"] = f"{depart_dt.strftime('%H:%M')} ~ 23:59"
@@ -726,6 +737,7 @@ async def _patch_flight(deps: Any, user_message: str) -> OrchestratorResult | No
             "place": offer["destination"],
             "note": f"출발 {depart_dt.strftime('%H:%M')} {offer['origin']} | 도착 {arrive_dt.strftime('%H:%M')} {offer['destination']} | 총 비행시간 약 {offer.get('duration', '?')} | 시차 0h | {'직항' if offer.get('stops', 0) == 0 else str(offer.get('stops')) + '회 경유'}",
             "cost": None,
+            "image_url": offer.get("image_url"),  # 항공사 로고
         }
         arrival_items = day_plans.setdefault(arrival_date_key, [])
         arrival_items.insert(0, arrival_item)
@@ -979,11 +991,29 @@ async def _patch_hotel(deps: Any, user_message: str) -> OrchestratorResult | Non
     else:
         hotel = hotels[0]
 
+    # booking_url은 선택된 호텔에 대해서만 상세 호출로 채움 (파이프라인과 동일 정책)
+    booking_url = None
+    if hotel.get("hotel_id"):
+        detail_query = {
+            "hotel_id": hotel["hotel_id"],
+            "arrival_date": check_in[:10],
+            "departure_date": check_out[:10],
+            "adults": deps.current_itinerary.get("adult_count") or 1,
+        }
+        _child_ages = deps.current_itinerary.get("child_ages") or []
+        if _child_ages:
+            detail_query["children_age"] = ",".join(str(a) for a in _child_ages)
+        detail = await _service.process_task("booking", "get_hotel_details", detail_query)
+        if isinstance(detail, dict) and detail.get("status") == "success":
+            booking_url = (detail.get("data") or {}).get("booking_url")
+
     patched = dict(item)
     patched["plan_name"] = f"{hotel.get('name', '숙소')} 체크인"
     patched["place"] = hotel.get("address") or city
     patched["note"] = f"{check_in} ~ {check_out} 숙박. 평점: {hotel.get('rating') or '정보 없음'}."
     patched["cost"] = _cost_from_amount(hotel.get("price_original"), hotel.get("currency"), hotel.get("price_krw"))
+    patched["image_url"] = hotel.get("image_url")  # Booking 호텔 사진
+    patched["url"] = booking_url                    # Booking 예약 deeplink
     day_plans[date_key][index] = patched
     _sync_hotel_related_items(
         day_plans,
@@ -1106,14 +1136,13 @@ async def _search_hotels_with_city_fallbacks(itinerary: dict, city: str, check_i
     last_result: dict = {"status": "error", "data": []}
     city_name = await _normalize_city_for_search(city)
     for city_name in _dedupe([city_name, city]):
-        result = await _service.process_task("duffel_accommodation", "search_hotels", {
-            "city_name": city_name,
-            "check_in": check_in,
-            "check_out": check_out,
-            "adults": itinerary.get("adult_count") or 1,
-            "children": itinerary.get("child_count") or 0,
-            "child_ages": itinerary.get("child_ages") or [],
-        })
+        # Booking 2단계(search_destination→search_hotels) + 평면 정규화 — 파이프라인 _fetch_hotels 재사용
+        result = await _fetch_hotels(
+            city_name, check_in, check_out,
+            itinerary.get("adult_count") or 1,
+            itinerary.get("child_count") or 0,
+            itinerary.get("child_ages") or [],
+        )
         last_result = result
         if result.get("status") == "success" and result.get("data"):
             return result
