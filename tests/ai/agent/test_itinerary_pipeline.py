@@ -715,6 +715,34 @@ class TestSynthesizerPromptOrigin:
         assert "마지막날 마지막 항목: 부산 귀국 항공 이동" in prompt
 
 
+# ── 당일치기 + 출발지 결합 ────────────────────────────────────────────────────
+
+class TestDayTripWithOrigin:
+    """당일치기(is_day_trip=True)와 출발지 지정이 함께 와도 문구가 충돌 없이 결합되는지 확인."""
+
+    def test_planner_prompt_combines_day_trip_and_origin(self):
+        prompt = _build_planner_prompt(_make_planner_deps(is_day_trip=True, origin="부산"))
+        # 당일치기 전용 섹션 유지
+        assert "## 당일치기 시간 범위 제약" in prompt
+        assert "하루 총 4~6개 항목" in prompt
+        assert "2. selected_hotels: 당일치기(숙박 없음)이므로 빈 배열로 반환" in prompt
+        # 출발지 반영 문구도 함께 적용
+        assert "출발지: 부산 —" in prompt
+        assert "여행 경로: 부산 → 서울 → 부산" in prompt
+        assert "인천국제공항(ICN) 또는 김포공항(GMP)" not in prompt
+
+    def test_synthesizer_prompt_combines_day_trip_and_origin(self):
+        prompt = _build_synthesizer_prompt(_make_synth_deps(is_day_trip=True, origin="부산"))
+        # 당일치기 전용 섹션 유지 (숙소 귀환 규칙 없음)
+        assert "## 당일치기 시작/종료 시간 범위" in prompt
+        assert "## 숙소 귀환·휴식 배치 규칙" not in prompt
+        assert "## 선택된 숙소" not in prompt
+        # 출발지 반영 문구도 함께 적용
+        assert "이 여행의 출발지는 부산이다." in prompt
+        assert "1일차 첫 항목: 부산 출발 항공 이동" in prompt
+        assert "마지막날 마지막 항목: 부산 귀국 항공 이동" in prompt
+
+
 # ── _fetch_flight_legs: 출발지 파라미터화 ─────────────────────────────────────
 
 class TestFetchFlightLegsOrigin:
