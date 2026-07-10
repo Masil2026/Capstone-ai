@@ -706,6 +706,7 @@ class TestSynthesizerPromptOrigin:
         assert "여행 경로: 한국 → 서울 → 한국" in prompt
         assert "1일차 첫 항목: 한국 출발 항공 이동" in prompt
         assert "마지막날 마지막 항목: 한국 귀국 항공 이동" in prompt
+        assert "한국 내 활동(출발 준비, 공항 이동, 귀국 후): 출발지 현지 시각" in prompt
 
     def test_given_origin_replaces_korea_wording(self):
         prompt = _build_synthesizer_prompt(_make_synth_deps(is_day_trip=False, origin="부산"))
@@ -713,6 +714,8 @@ class TestSynthesizerPromptOrigin:
         assert "여행 경로: 부산 → 서울 → 부산" in prompt
         assert "1일차 첫 항목: 부산 출발 항공 이동" in prompt
         assert "마지막날 마지막 항목: 부산 귀국 항공 이동" in prompt
+        assert "부산 내 활동(출발 준비, 공항 이동, 귀국 후): 출발지 현지 시각" in prompt
+        assert "KST(UTC+9)" not in prompt
 
 
 # ── 당일치기 + 출발지 결합 ────────────────────────────────────────────────────
