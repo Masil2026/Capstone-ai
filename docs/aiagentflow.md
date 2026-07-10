@@ -447,7 +447,7 @@ AI 에이전트는 **DB(PostgreSQL)를 진실의 원천(source of truth)**으로
 | 단계 | 모델 | 호출 수 |
 |------|------|---------|
 | classification_agent | gemini-2.5-flash | 1 |
-| _extract_english_cities (배치) | gemini-2.5-flash | 1 (N개 도시 한 번에) |
+| _extract_english_cities (배치) | gemini-2.5-flash | 1 (출발지 + N개 도시 한 번에) |
 | _fetch_web_summaries (도시별 병렬 후 배치 요약) | gemini-2.5-flash | 1 |
 | planner_agent | gemini-2.5-pro | 1 |
 | synthesizer_agent | gemini-2.5-pro | 1 |
@@ -463,12 +463,31 @@ destinations = [Paris(06-01~04), Rome(06-04~07), Barcelona(06-07~10)]
 병렬 실행:
   웹 검색   × 3 도시 (Tavily, 도시당 2쿼리)
   날씨      × 3 도시 (Open-Meteo)
-  항공      × 4 구간 (Seoul→Paris, Paris→Rome, Rome→Barcelona, Barcelona→Seoul)
+  항공      × 4 구간 (출발지→Paris, Paris→Rome, Rome→Barcelona, Barcelona→출발지)
   숙소      × 3 도시 (Booking, 각자 check_in/check_out 다름)
-  도시명 영문 변환 (배치 1회 — gemini-2.5-flash)
+  도시명 영문 변환 (출발지 + 목적지 전체, 배치 1회 — gemini-2.5-flash)
 
 웹검색 결과 요약 (배치 1회 — gemini-2.5-flash): 전 도시 결과 → 도시별 요약 dict
 ```
+
+### 출발지(origin) 처리
+
+`itineraries.origin` 컬럼 값을 기준으로 depart/return 항공 구간을 검색합니다. `_DEFAULT_ORIGIN`(`"Seoul"`)은 출발지 미입력 시에만 쓰이는 폴백입니다.
+
+```
+origin_raw = itinerary.get("origin")   # None이면 미입력
+translated = _extract_english_cities([origin_raw or _DEFAULT_ORIGIN, *cities_kr])
+origin_en, cities_en = translated[0], translated[1:]
+
+_fetch_flight_legs(destinations, cities_en, adults, children, child_ages, origin_en)
+  leg 0      : origin_en → cities_en[0]      (depart)
+  leg 1..N-1 : cities_en[i-1] → cities_en[i] (connect)
+  leg N      : cities_en[-1] → origin_en     (return)
+```
+
+`_origin_ctx(origin_raw)`가 플래너/합성기 프롬프트의 출발지 문구를 조립합니다.
+- 미입력(`None`): 기존 "대한민국 — 인천국제공항(ICN)/김포공항(GMP)" 문구 그대로 유지 (하위 호환).
+- 입력 있음: "실제 출발 공항은 항공편 검색 결과의 공항 코드를 따른다"는 일반화 문구로 대체 — 특정 공항 코드를 프롬프트에 못박지 않고, Booking 검색 결과(실제 IATA 코드)를 LLM이 참고하도록 위임.
 
 ### Phase 2 — 플래너 (gemini-2.5-pro ×1)
 
