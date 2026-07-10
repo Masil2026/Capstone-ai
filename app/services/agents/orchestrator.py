@@ -86,7 +86,7 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 **[응답 형식 — 반드시 준수]**
 반환 JSON의 필드를 아래와 같이 채워야 한다:
 - `change`: 변경된 필드만 포함 (변경하지 않은 필드는 null)
-  가능한 필드: destinations, start_date, end_date, budget, adult_count, child_count, child_ages
+  가능한 필드: destinations, start_date, end_date, budget, adult_count, child_count, child_ages, origin
 - `message`: 무엇이 어떻게 변경되었는지 구체적으로 안내한다.
   예) "여행 기간을 5월 3일~7일로 변경하고, 예산을 50만원으로 조정했습니다."
   정보 부족 시: 누락된 정보를 구체적으로 명시하며 질문한다.
@@ -222,6 +222,7 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
 
         section_lines = [
             "## 현재 여행 기본 정보 (DB에서 조회된 실제 값 — 반드시 이 데이터를 기준으로 답변할 것)",
+            f"- 출발지: {it.get('origin') or '미설정(기본값: 서울/대한민국)'}",
             f"- 여행지: {dest_str}",
             f"- 여행 기간: {it.get('start_date')} ~ {it.get('end_date')} ({it.get('total_days')}일)",
             f"- 예산: {budget_str}",

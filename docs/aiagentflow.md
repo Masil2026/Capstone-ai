@@ -81,7 +81,7 @@ roomId
   ↓
 PostgreSQL read-only 조회
   SELECT destinations, start_date, end_date, total_days,
-         budget, adult_count, child_count, child_ages, day_plans
+         budget, adult_count, child_count, child_ages, day_plans, origin
   FROM itineraries WHERE room_id = :room_id
   ↓
 current_itinerary → orchestrator 시스템 프롬프트에 주입
@@ -110,7 +110,7 @@ orchestrator가 응답 생성 시 활용하는 컨텍스트:
 | preferences | 사용자 취향 JSON (전체 누적) | DB chat_rooms (매 요청 직접 조회) |
 | chat_history | 최근 20개 메시지 | DB chat_messages (매 요청 직접 조회) |
 | 유사 과거 메시지 | 의미적으로 유사한 과거 대화 최대 5개 | pgvector (read-only) |
-| current_itinerary | 현재 여행 일정 전체 (destinations 배열·dates·budget·adults 포함) | DB itineraries (read-only) |
+| current_itinerary | 현재 여행 일정 전체 (origin·destinations 배열·dates·budget·adults 포함) | DB itineraries (read-only) |
 
 > FastAPI의 DB 접근은 **read-only**에 한합니다. 모든 DB 쓰기는 Java(Spring Boot)가 `done` 이벤트 수신 후 처리합니다.
 
@@ -217,6 +217,7 @@ class ChangeFields(BaseModel):
     adult_count: int | None = None
     child_count: int | None = None
     child_ages: list[int] | None = None
+    origin: str | None = None       # 출발지 도시명 (한국어 원본)
 
 class DestinationItem(BaseModel):
     city: str
