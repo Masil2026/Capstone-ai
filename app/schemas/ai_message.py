@@ -50,6 +50,10 @@ class DestinationItem(BaseModel):
     end_date: str       # YYYY-MM-DD
 
 
+class OriginItem(BaseModel):
+    city: str
+
+
 class ChangeFields(BaseModel):
     destinations: list[DestinationItem] | None = None
     start_date: str | None = None   # YYYY-MM-DD
@@ -58,7 +62,7 @@ class ChangeFields(BaseModel):
     adult_count: int | None = None
     child_count: int | None = None
     child_ages: list[int] | None = None
-    origin: str | None = None       # 출발지 도시명 (한국어 원본)
+    origin: OriginItem | None = None
 
 
 class CancelFields(BaseModel):
@@ -121,7 +125,7 @@ class ChangePayload(BaseModel):
     adultCount: int | None = None
     childCount: int | None = None
     childAges: list[int] | None = None
-    origin: str | None = None
+    origin: dict | None = None
 
     def model_dump_exclude_none(self) -> dict[str, Any]:
         return self.model_dump(exclude_none=True)

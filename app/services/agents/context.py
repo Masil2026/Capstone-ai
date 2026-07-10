@@ -193,6 +193,11 @@ async def _query_current_itinerary(room_id: str) -> dict | None:
         if isinstance(child_ages, str):
             child_ages = json.loads(child_ages)
 
+        origin = row.origin
+        if isinstance(origin, str):
+            origin = json.loads(origin)
+        origin_city = origin.get("city") if origin else None
+
         return {
             "destinations": destinations,
             "start_date": _to_date_str(row.start_date),
@@ -203,7 +208,7 @@ async def _query_current_itinerary(room_id: str) -> dict | None:
             "child_count": row.child_count,
             "child_ages": child_ages or [],
             "day_plans": day_plans,
-            "origin": row.origin,
+            "origin": origin_city,
         }
 
 
