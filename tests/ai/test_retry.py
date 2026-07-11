@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from app.services.agents._base import (
     _is_rate_limit_error,
-    _llm_bucket,
+    _flash_bucket,
     _retry_wait,
     run_with_retry,
 )
@@ -87,7 +87,7 @@ async def test_succeeds_on_second_attempt():
         MagicMock(output="2번째 성공"),
     ])
 
-    with patch.object(_llm_bucket, "acquire", new_callable=AsyncMock):
+    with patch.object(_flash_bucket, "acquire", new_callable=AsyncMock):
         with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             with patch("app.services.agents._base.random.uniform", return_value=0.0):
                 result = await run_with_retry(mock_agent, "프롬프트", role="test")
@@ -106,7 +106,7 @@ async def test_succeeds_on_third_attempt():
         MagicMock(output="3번째 성공"),
     ])
 
-    with patch.object(_llm_bucket, "acquire", new_callable=AsyncMock):
+    with patch.object(_flash_bucket, "acquire", new_callable=AsyncMock):
         with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             with patch("app.services.agents._base.random.uniform", return_value=0.0):
                 result = await run_with_retry(mock_agent, "프롬프트", role="test")
@@ -128,7 +128,7 @@ async def test_backoff_increases_exponentially():
         MagicMock(output="ok"),
     ])
 
-    with patch.object(_llm_bucket, "acquire", new_callable=AsyncMock):
+    with patch.object(_flash_bucket, "acquire", new_callable=AsyncMock):
         with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             with patch("app.services.agents._base.random.uniform", return_value=0.0):
                 await run_with_retry(mock_agent, "프롬프트", role="test")
@@ -157,7 +157,7 @@ async def test_non_429_raises_immediately_without_retry():
     mock_agent = MagicMock()
     mock_agent.run = AsyncMock(side_effect=ValueError("잘못된 입력"))
 
-    with patch.object(_llm_bucket, "acquire", new_callable=AsyncMock):
+    with patch.object(_flash_bucket, "acquire", new_callable=AsyncMock):
         with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             with pytest.raises(ValueError, match="잘못된 입력"):
                 await run_with_retry(mock_agent, "프롬프트", role="test")

@@ -32,7 +32,7 @@ from app.services.agents.orchestrator import (
     change_extractor_agent,
     orchestrator_agent,
 )
-from app.services.agents._base import run_with_retry, _is_rate_limit_error, _retry_wait
+from app.services.agents._base import acquire_llm_slot, run_with_retry, _is_rate_limit_error, _retry_wait
 
 router = APIRouter()
 
@@ -429,6 +429,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
 
             if orch_result is None:
                 print("[_stream] pipeline None → orchestrator 스트리밍 폴백", flush=True)
+                await acquire_llm_slot("orchestrator")  # run_stream은 버킷을 안 타므로 직접 확보
                 for attempt in range(4):
                     yielded_any = False
                     try:
@@ -453,6 +454,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
                             raise
         else:
             print("[_stream] orchestrator_agent.run_stream() 호출", flush=True)
+            await acquire_llm_slot("orchestrator")  # run_stream은 버킷을 안 타므로 직접 확보
             for attempt in range(4):
                 yielded_any = False
                 try:

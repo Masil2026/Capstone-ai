@@ -6,7 +6,13 @@ time.monotonic과 asyncio.sleep을 mock하여 실제 대기 없이 동작을 검
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.agents._base import _TokenBucket, _llm_bucket, run_with_retry
+from app.services.agents._base import (
+    _TokenBucket,
+    _flash_bucket,
+    _pro_bucket,
+    acquire_llm_slot,
+    run_with_retry,
+)
 
 
 # ── 즉시 통과 ─────────────────────────────────────────────────────────────────
@@ -115,12 +121,36 @@ async def test_tokens_capped_at_capacity():
 
 # ── settings 연동 ─────────────────────────────────────────────────────────────
 
-def test_llm_bucket_rate_matches_vertex_ai_rpm():
-    """모듈 레벨 _llm_bucket이 VERTEX_AI_RPM으로 초기화됐는지 확인."""
+def test_buckets_match_settings_rpm():
+    """모델별 버킷이 각자의 RPM 설정으로 초기화됐는지 확인."""
     from app.core.config import settings
 
-    assert _llm_bucket._rate == pytest.approx(settings.VERTEX_AI_RPM / 60)
-    assert _llm_bucket._capacity == pytest.approx(max(5.0, settings.VERTEX_AI_RPM / 10))
+    assert _flash_bucket._rate == pytest.approx(settings.VERTEX_AI_RPM / 60)
+    assert _flash_bucket._capacity == pytest.approx(max(2.0, settings.VERTEX_AI_RPM / 10))
+    assert _pro_bucket._rate == pytest.approx(settings.VERTEX_AI_PRO_RPM / 60)
+    assert _pro_bucket._capacity == pytest.approx(max(2.0, settings.VERTEX_AI_PRO_RPM / 10))
+
+
+# ── 모델별 버킷 라우팅 ────────────────────────────────────────────────────────
+
+async def test_pro_roles_route_to_pro_bucket():
+    """orchestrator·planner·synthesizer role은 pro 버킷을 쓴다."""
+    for role in ("orchestrator", "planner", "synthesizer"):
+        with patch.object(_pro_bucket, "acquire", new_callable=AsyncMock) as pro_acq, \
+             patch.object(_flash_bucket, "acquire", new_callable=AsyncMock) as flash_acq:
+            await acquire_llm_slot(role)
+        pro_acq.assert_awaited_once()
+        flash_acq.assert_not_awaited()
+
+
+async def test_flash_roles_route_to_flash_bucket():
+    """preprocessor·classification·safety·change_extractor role은 flash 버킷을 쓴다."""
+    for role in ("preprocessor", "classification", "safety", "change_extractor"):
+        with patch.object(_pro_bucket, "acquire", new_callable=AsyncMock) as pro_acq, \
+             patch.object(_flash_bucket, "acquire", new_callable=AsyncMock) as flash_acq:
+            await acquire_llm_slot(role)
+        pro_acq.assert_not_awaited()
+        flash_acq.assert_awaited_once()
 
 
 # ── run_with_retry 통합 ────────────────────────────────────────────────────────
@@ -142,7 +172,7 @@ async def test_run_with_retry_calls_acquire_once_even_with_retries():
         nonlocal acquire_count
         acquire_count += 1
 
-    with patch.object(_llm_bucket, "acquire", side_effect=fake_acquire):
+    with patch.object(_flash_bucket, "acquire", side_effect=fake_acquire):
         with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock):
             with patch("app.services.agents._base.random.uniform", return_value=0.0):
                 await run_with_retry(mock_agent, "프롬프트", role="test")
@@ -162,7 +192,7 @@ async def test_run_with_retry_each_independent_call_acquires_separately():
         nonlocal acquire_count
         acquire_count += 1
 
-    with patch.object(_llm_bucket, "acquire", side_effect=fake_acquire):
+    with patch.object(_flash_bucket, "acquire", side_effect=fake_acquire):
         await run_with_retry(mock_agent, "첫 번째 요청", role="test")
         await run_with_retry(mock_agent, "두 번째 요청", role="test")
 

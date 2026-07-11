@@ -33,7 +33,7 @@ from app.services.adapters.korea_tourism_api import KoreaTourismAdapter
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.travel_agent_service import TravelAgentService
-from ._base import _build_model, preprocessor_agent, run_with_retry, _is_rate_limit_error, _retry_wait
+from ._base import _build_model, acquire_llm_slot, preprocessor_agent, run_with_retry, _is_rate_limit_error, _retry_wait
 
 _service = TravelAgentService({
     "booking":              BookingAdapter(),
@@ -1950,6 +1950,7 @@ async def run_itinerary_pipeline(
         origin=origin_raw,
     )
     synth_context = _build_synthesizer_prompt(synth_deps)
+    await acquire_llm_slot("synthesizer")  # run_stream은 run_with_retry를 안 타므로 직접 슬롯 확보
     for attempt in range(4):
         yielded_any = False
         try:

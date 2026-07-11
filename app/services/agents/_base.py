@@ -79,11 +79,27 @@ class _TokenBucket:
             await asyncio.sleep(wait)
 
 
-# RPM 기준: rate = 초당 처리량, capacity = RPM의 10% (최소 5)
-_llm_bucket = _TokenBucket(
-    rate=settings.VERTEX_AI_RPM / 60,
-    capacity=max(5.0, settings.VERTEX_AI_RPM / 10),
-)
+def _make_bucket(rpm: int) -> _TokenBucket:
+    """RPM 기준: rate = 초당 처리량, capacity = RPM의 10% (최소 2 — 저쿼터 모델 버스트 방지)"""
+    return _TokenBucket(rate=rpm / 60, capacity=max(2.0, rpm / 10))
+
+
+# Vertex 쿼터는 모델별이므로 버킷을 분리한다: orchestrator(pro) 계열 vs 나머지(flash) 계열
+_pro_bucket = _make_bucket(settings.VERTEX_AI_PRO_RPM)
+_flash_bucket = _make_bucket(settings.VERTEX_AI_RPM)
+
+# pro 모델(_build_model("orchestrator"))을 쓰는 role — 나머지는 전부 flash
+_PRO_ROLES = frozenset({"orchestrator", "planner", "synthesizer"})
+
+
+async def acquire_llm_slot(role: str) -> None:
+    """role에 해당하는 모델 버킷에서 슬롯 확보.
+
+    run_with_retry가 자동으로 호출한다. run_stream처럼 run_with_retry를 타지 않는
+    호출은 스트림 시작 전에 직접 호출할 것.
+    """
+    bucket = _pro_bucket if role in _PRO_ROLES else _flash_bucket
+    await bucket.acquire()
 
 
 def _is_rate_limit_error(e: Exception) -> bool:
@@ -104,7 +120,7 @@ async def run_with_retry(agent: Agent, prompt: str, *, role: str, max_retries: i
     - max_retries=4 → 최대 대기 합계 약 1+2+4+8 = 15초
     - jitter: 동시 요청들이 같은 타이밍에 재시도하는 Thundering Herd 방지
     """
-    await _llm_bucket.acquire()
+    await acquire_llm_slot(role)
     for attempt in range(max_retries):
         try:
             return await agent.run(prompt, **kwargs)
