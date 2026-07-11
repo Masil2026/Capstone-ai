@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from app.services.agents._base import (
     _is_rate_limit_error,
+    _llm_bucket,
     _retry_wait,
     run_with_retry,
 )
@@ -86,9 +87,10 @@ async def test_succeeds_on_second_attempt():
         MagicMock(output="2번째 성공"),
     ])
 
-    with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        with patch("app.services.agents._base.random.uniform", return_value=0.0):
-            result = await run_with_retry(mock_agent, "프롬프트", role="test")
+    with patch.object(_llm_bucket, "acquire", new_callable=AsyncMock):
+        with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with patch("app.services.agents._base.random.uniform", return_value=0.0):
+                result = await run_with_retry(mock_agent, "프롬프트", role="test")
 
     assert result.output == "2번째 성공"
     assert mock_agent.run.call_count == 2
@@ -104,9 +106,10 @@ async def test_succeeds_on_third_attempt():
         MagicMock(output="3번째 성공"),
     ])
 
-    with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        with patch("app.services.agents._base.random.uniform", return_value=0.0):
-            result = await run_with_retry(mock_agent, "프롬프트", role="test")
+    with patch.object(_llm_bucket, "acquire", new_callable=AsyncMock):
+        with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with patch("app.services.agents._base.random.uniform", return_value=0.0):
+                result = await run_with_retry(mock_agent, "프롬프트", role="test")
 
     assert result.output == "3번째 성공"
     assert mock_agent.run.call_count == 3
@@ -125,9 +128,10 @@ async def test_backoff_increases_exponentially():
         MagicMock(output="ok"),
     ])
 
-    with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        with patch("app.services.agents._base.random.uniform", return_value=0.0):
-            await run_with_retry(mock_agent, "프롬프트", role="test")
+    with patch.object(_llm_bucket, "acquire", new_callable=AsyncMock):
+        with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with patch("app.services.agents._base.random.uniform", return_value=0.0):
+                await run_with_retry(mock_agent, "프롬프트", role="test")
 
     sleep_values = [c[0][0] for c in mock_sleep.call_args_list]
     assert sleep_values == [1.0, 2.0, 4.0]
@@ -153,9 +157,10 @@ async def test_non_429_raises_immediately_without_retry():
     mock_agent = MagicMock()
     mock_agent.run = AsyncMock(side_effect=ValueError("잘못된 입력"))
 
-    with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        with pytest.raises(ValueError, match="잘못된 입력"):
-            await run_with_retry(mock_agent, "프롬프트", role="test")
+    with patch.object(_llm_bucket, "acquire", new_callable=AsyncMock):
+        with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with pytest.raises(ValueError, match="잘못된 입력"):
+                await run_with_retry(mock_agent, "프롬프트", role="test")
 
     mock_agent.run.assert_called_once()
     mock_sleep.assert_not_called()
