@@ -1,8 +1,21 @@
+import asyncio
 import httpx
 
 from typing import Any, Dict, List, Optional, Tuple
 from app.core.ApiToolsInterfaces import ApiTools
 from app.core.config import settings
+
+
+# 무료 티어(RapidAPI) rate limit 대응 — 동시 호출 제한 + 429 backoff 재시도
+_BOOKING_MAX_CONCURRENCY = 2
+_BOOKING_MAX_RETRIES = 3
+
+
+def _to_int_or(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class BookingAdapter(ApiTools):
@@ -27,6 +40,9 @@ class BookingAdapter(ApiTools):
     # 국내 중심 정책 고정값
     _CURRENCY = "KRW"
     _LANG = "ko"
+
+    # 모든 인스턴스가 공유하는 동시성 제한 (Booking 호출이 한꺼번에 몰리는 것 방지)
+    _rate_limit = asyncio.Semaphore(_BOOKING_MAX_CONCURRENCY)
 
     def __init__(self):
         self.api_key = (settings.BOOKING_API_KEY or "").strip()
@@ -296,15 +312,39 @@ class BookingAdapter(ApiTools):
         print(f"\n[BookingAdapter] GET {path}")
         print(f"Params: {query}")
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                response = await client.get(url, params=query, headers=headers)
-            except httpx.TimeoutException:
-                return None, {"status": "error", "message": f"Booking API 타임아웃 (30초 초과): {path}"}
-            except httpx.RequestError as e:
-                return None, {"status": "error", "message": f"Booking API 요청 실패: {str(e)}"}
+        response = None
+        for attempt in range(_BOOKING_MAX_RETRIES + 1):
+            # 세마포어는 실제 요청 구간만 점유 → backoff 대기 중엔 다른 호출이 진행 가능
+            async with self._rate_limit:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    try:
+                        response = await client.get(url, params=query, headers=headers)
+                    except httpx.TimeoutException:
+                        return None, {"status": "error", "message": f"Booking API 타임아웃 (30초 초과): {path}"}
+                    except httpx.RequestError as e:
+                        return None, {"status": "error", "message": f"Booking API 요청 실패: {str(e)}"}
 
-        print(f"[BookingAdapter] HTTP Status: {response.status_code}")
+            print(f"[BookingAdapter] HTTP Status: {response.status_code}")
+
+            # 429는 두 종류: (a) 초당 rate 초과 → backoff 재시도 / (b) 월 쿼터 소진 → 재시도 무의미, 즉시 포기
+            if response.status_code == 429:
+                h = response.headers
+                body = response.text
+                remaining = h.get("x-ratelimit-requests-remaining")
+                quota_exhausted = "monthly" in body.lower() or (remaining is not None and _to_int_or(remaining, 1) <= 0)
+                print(
+                    "[BookingAdapter] 429 정보 — "
+                    f"월한도={h.get('x-ratelimit-requests-limit')} 월잔여={remaining} "
+                    f"초당한도={h.get('x-ratelimit-rate-limit-limit')} "
+                    f"{'[월 쿼터 소진 — 재시도 안 함]' if quota_exhausted else '[초당 rate — 재시도]'} "
+                    f"body={body[:120]}"
+                )
+                if not quota_exhausted and attempt < _BOOKING_MAX_RETRIES:
+                    wait = 1.0 * (2 ** attempt)  # 1s → 2s → 4s
+                    print(f"[BookingAdapter] backoff {wait:.0f}s 후 재시도 ({attempt + 1}/{_BOOKING_MAX_RETRIES})")
+                    await asyncio.sleep(wait)
+                    continue
+            break
 
         if response.status_code != 200:
             return None, {"status": "error", "message": f"HTTP 오류: {response.status_code} - {response.text[:200]}"}
@@ -516,6 +556,7 @@ class BookingAdapter(ApiTools):
                     "to": self._dig(leg, "arrivalAirport", "code"),
                     "flight_number": self._dig(leg, "flightInfo", "flightNumber"),
                     "carriers": [c.get("name") for c in (leg.get("carriersData") or [])],
+                    "logo": ((leg.get("carriersData") or [{}])[0] or {}).get("logo"),  # 대표(첫) 항공사 로고
                     "cabin_class": leg.get("cabinClass"),
                 }
                 for leg in legs

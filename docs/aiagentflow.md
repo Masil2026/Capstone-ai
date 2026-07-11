@@ -7,9 +7,9 @@
 | 0. 인증 | X-Internal-Token | Spring Boot → FastAPI 서버 간 인증 |
 | 1. 메모리 동기화 | Redis | 요청 memory와 Redis 비교·갱신 |
 | 2. 장기 기억 로드 | Vertex AI Embeddings + pgvector | 사용자 메시지와 유사한 과거 대화 검색 |
-| 3. 의도 파악 + 스트리밍 | Orchestrator (gemini-3.1-pro-preview) | 도구 호출·외부 API 수집·텍스트 스트리밍 |
-| 4. 데이터 전처리 | preprocessor_agent (gemini-3.5-flash) | Tavily 비정형 결과 요약 (도구 함수 내부) |
-| 5. 타입 판별 | classification_agent (gemini-3.5-flash) | 스트리밍 완료 후 응답 의도 분류 |
+| 3. 의도 파악 + 응답 생성 | Orchestrator (gemini-2.5-pro) / itinerary는 파이프라인 | 도구 호출·외부 API 수집·응답 생성 |
+| 4. 데이터 전처리 | preprocessor_agent (gemini-2.5-flash) | Tavily 비정형 결과 요약 (도구 함수 내부) |
+| 5. 타입 판별 | classification_agent (gemini-2.5-flash) | 응답 의도 분류 (orchestrator 실행 전) |
 | 6. 임베딩 생성 | Vertex AI Embeddings | AI 응답 벡터화 |
 | 7. done 이벤트 전송 | FastAPI SSE | 최종 구조화 페이로드 전달 |
 
@@ -116,7 +116,7 @@ orchestrator가 응답 생성 시 활용하는 컨텍스트:
 
 ---
 
-## 3. 스트리밍 응답 생성 — Orchestrator (gemini-3.1-pro-preview)
+## 3. 스트리밍 응답 생성 — Orchestrator (gemini-2.5-pro)
 
 ### 3-1. 동적 컨텍스트 주입 (OrchestratorDeps)
 
@@ -170,13 +170,13 @@ run_result = await orchestrator_agent.run(
 classification_agent가 판별한 `type`은 `OrchestratorDeps.request_type`으로 전달됩니다.
 orchestrator는 이를 참고해 적절한 도구를 선택합니다.
 
-| type | 외부 API 도구 | 구조화 출력 필드 | Spring Boot 후처리 |
-|------|-------------|----------------|------------------|
-| `itinerary` | search_place, search_web, get_weather, find_route 등 | `day_plans` | dayPlans로 DB 일정 교체. `day_plans=null`이면 되묻기로 처리하여 DB 업데이트 없음 |
-| `change` | **없음** | `change` | change 값으로 DB 직접 업데이트. `change=null`이면 되묻기로 처리하여 DB 업데이트 없음 |
-| `reservation` | search_flights / search_hotels + 예약 API | `reservation` | reservations 테이블 저장 |
-| `cancel` | 취소 API | `cancel` | reservations.status = "cancelled" |
-| `chat` | search_web, get_weather 등 (필요 시) | — | 추가 처리 없음 |
+| type | 처리 주체 / 외부 API | 구조화 출력 필드 | Spring Boot 후처리 |
+|------|-------------------|----------------|------------------|
+| `itinerary` | **`run_itinerary_pipeline`** (planner+synthesizer). 내부에서 Booking·google_maps·korea_tourism·tavily·weather 호출 (오케스트레이터 도구 아님) | `day_plans` | dayPlans로 DB 일정 교체. `day_plans=null`이면 되묻기로 처리하여 DB 업데이트 없음 |
+| `change` | 오케스트레이터 (외부 API 없음) | `change` | change 값으로 DB 직접 업데이트. `change=null`이면 되묻기로 처리하여 DB 업데이트 없음 |
+| `reservation` | 오케스트레이터 (외부 API 없음). 일정 항목의 예약 딥링크(`url`)를 안내 | 없음 (`reservation=null`) | 없음 — done이 `chat`으로 강등되어 DB 저장 없음 |
+| `cancel` | **컨트롤러 선처리 인터셉트** — "예약처에서 직접 취소" 안내 (오케스트레이터 미호출) | 없음 (`cancel=null`) | 없음 |
+| `chat` | 오케스트레이터. search_web, get_weather 등 (필요 시) | — | 추가 처리 없음 |
 
 #### itinerary 타입 — 필수 정보 검증 (2중 검증)
 
@@ -230,33 +230,32 @@ class DestinationItem(BaseModel):
 
 ### 3-3. 도구 호출 및 응답 수신
 
+- **itinerary 타입**: `run_itinerary_pipeline`이 처리(planner → 데이터 수집 → synthesizer). synthesizer가 message를 실시간 스트리밍.
+- **그 외(chat·change·reservation)**: `orchestrator_agent.run_stream`으로 실행. (cancel은 [3-2]대로 컨트롤러가 선처리)
+
 ```
 build_context_prompt(deps) → context_block 생성
   ↓
-orchestrator_agent.run(
+orchestrator_agent.run_stream(
     f"{context_block}\n\n---\n\n사용자 메시지: {user_input}",
     deps=OrchestratorDeps(...),
     message_history=history,
 )
-  ↓
-type에 따라 필요한 도구 호출 (change는 도구 호출 없음)
-  ↓
-OrchestratorResult 구조화 출력 반환 (result.data)
-  ↓
-result.data.message → SSE event: chunk 한 번에 전송
-result.data.day_plans / change / reservation / cancel → done 이벤트에 포함
+  ↓  stream_output()으로 message 필드를 토큰 단위로 SSE event: chunk 실시간 전송
+  ↓  await stream_result.get_output() → OrchestratorResult (result.output)
+day_plans / change → done 이벤트에 포함 (reservation·cancel은 null → chat 강등)
 ```
 
-> 구조화 출력(`result_type=OrchestratorResult`)이기 때문에 `run_stream`이 아닌 `run`을 사용합니다.
-> chunk 이벤트는 스트리밍이 아닌 단일 전송입니다.
+> 에이전트는 `output_type=OrchestratorResult`(구조화 출력)이며, `run_stream` + `stream_output()`으로
+> `message` 필드를 실시간 스트리밍합니다. (pydantic-ai v0.6.0+ 결과는 `result.output`)
 
-등록된 도구 8개의 입력/출력 명세는 **[docs/agent_tools.md](agent_tools.md)** 참조.
+등록된 오케스트레이터 도구 5개의 입력/출력 명세는 **[docs/agent_tools.md](agent_tools.md)** 참조.
 
 ---
 
 ## 4. 비정형 데이터 전처리 — preprocessor_agent
 
-`search_web` 도구 함수 내부에서 Tavily 결과를 gemini-3.5-flash로 요약합니다.
+`search_web` 도구 함수 내부에서 Tavily 결과를 gemini-2.5-flash로 요약합니다.
 Elasticsearch는 사용하지 않습니다.
 
 ```
@@ -264,7 +263,7 @@ Tavily 원본 결과 (최대 15개)
   ↓
 score ≥ 0.5 필터링 → 상위 10개 선택
   ↓
-preprocessor_agent (GPT-4o-mini) → 핵심 정보 요약
+preprocessor_agent (gemini-2.5-flash) → 핵심 정보 요약
   ↓
 오케스트레이터에게 요약본 반환
 ```
@@ -275,13 +274,13 @@ preprocessor_agent (GPT-4o-mini) → 핵심 정보 요약
 
 ## 5. 타입 판별 — classification_agent
 
-`classification_agent`(gemini-3.5-flash)는 **orchestrator 실행 전에** 사용자 메시지만 보고 `type`을 판별합니다.
-구조화 데이터(dayPlans, change 필드, reservation, memory 등)는 모두 orchestrator의 도구 호출이 담당합니다.
+`classification_agent`(gemini-2.5-flash)는 **orchestrator 실행 전에** 사용자 메시지만 보고 `type`을 판별합니다.
+구조화 데이터(dayPlans, change 필드, ai_summary, preferences 등)는 orchestrator/synthesizer의 **구조화 출력(OrchestratorResult)** 이 담당합니다(별도 submit 도구 없음).
 
 ```
 사용자 메시지
   ↓
-classification_agent.run(user_message, result_type=ResponseClassification)
+classification_agent.run(user_message)  # output_type=ResponseClassification
   ↓
 type 반환 ("chat" | "itinerary" | "change" | "reservation" | "cancel")
 ```
@@ -305,7 +304,7 @@ type 반환 ("chat" | "itinerary" | "change" | "reservation" | "cancel")
 
 ### ResponseClassification 구조
 
-type만 반환합니다. 구조화 데이터는 orchestrator의 submit_* 도구가 담당합니다.
+type만 반환합니다. 구조화 데이터는 orchestrator/synthesizer의 구조화 출력(OrchestratorResult)이 담당합니다.
 
 ```python
 class ResponseClassification(BaseModel):
@@ -446,12 +445,12 @@ AI 에이전트는 **DB(PostgreSQL)를 진실의 원천(source of truth)**으로
 
 | 단계 | 모델 | 호출 수 |
 |------|------|---------|
-| classification_agent | gemini-3.5-flash | 1 |
-| _extract_english_cities (배치) | gemini-3.5-flash | 1 (N개 도시 한 번에) |
-| _fetch_web_summaries (도시별 병렬 후 배치 요약) | gemini-3.5-flash | 1 |
-| planner_agent | gemini-3.1-pro-preview | 1 |
-| synthesizer_agent | gemini-3.1-pro-preview | 1 |
-| **합계** | | **gemini-3.1-pro-preview ×2 + gemini-3.5-flash ×3** |
+| classification_agent | gemini-2.5-flash | 1 |
+| _extract_english_cities (배치) | gemini-2.5-flash | 1 (N개 도시 한 번에) |
+| _fetch_web_summaries (도시별 병렬 후 배치 요약) | gemini-2.5-flash | 1 |
+| planner_agent | gemini-2.5-pro | 1 |
+| synthesizer_agent | gemini-2.5-pro | 1 |
+| **합계** | | **gemini-2.5-pro ×2 + gemini-2.5-flash ×3** |
 
 ### Phase 1 — 병렬 데이터 수집 (LLM 0회)
 
@@ -464,13 +463,13 @@ destinations = [Paris(06-01~04), Rome(06-04~07), Barcelona(06-07~10)]
   웹 검색   × 3 도시 (Tavily, 도시당 2쿼리)
   날씨      × 3 도시 (Open-Meteo)
   항공      × 4 구간 (Seoul→Paris, Paris→Rome, Rome→Barcelona, Barcelona→Seoul)
-  숙소      × 3 도시 (Duffel, 각자 check_in/check_out 다름)
-  도시명 영문 변환 (배치 1회 — GPT-4o-mini)
+  숙소      × 3 도시 (Booking, 각자 check_in/check_out 다름)
+  도시명 영문 변환 (배치 1회 — gemini-2.5-flash)
 
-웹검색 결과 요약 (배치 1회 — GPT-4o-mini): 전 도시 결과 → 도시별 요약 dict
+웹검색 결과 요약 (배치 1회 — gemini-2.5-flash): 전 도시 결과 → 도시별 요약 dict
 ```
 
-### Phase 2 — 플래너 (GPT-4.1 ×1)
+### Phase 2 — 플래너 (gemini-2.5-pro ×1)
 
 모든 목적지 데이터를 단일 프롬프트에 담아 한 번에 처리합니다.
 
@@ -501,7 +500,7 @@ class PlannerOutput(BaseModel):
 
 `DaySchedule.ordered_queries` 전체를 Google Maps에 병렬 호출합니다. 도시가 여러 개여도 쿼리에 도시명이 포함되어 있어 추가 처리 불필요합니다.
 
-### Phase 4 — 합성기 (GPT-4.1 ×1)
+### Phase 4 — 합성기 (gemini-2.5-pro ×1)
 
 전체 일정을 단일 호출로 작성합니다.
 
@@ -553,5 +552,5 @@ similar = await loop.run_in_executor(None, _query_similar_messages, room_id, emb
 
 | 역할 | `LLM_PROVIDER=vertexai` |
 |------|------------------------|
-| orchestrator | `gemini-3.1-pro-preview` |
-| preprocessor / classification | `gemini-3.5-flash` |
+| orchestrator | `gemini-2.5-pro` |
+| preprocessor / classification | `gemini-2.5-flash` |

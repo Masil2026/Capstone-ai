@@ -65,7 +65,7 @@ class {서비스명}Adapter(ApiTools):
 
     @property
     def tool_name(self) -> str:
-        return "{서비스_식별자}"  # 예: "duffel_flight", "google_maps"
+        return "{서비스_식별자}"  # 예: "booking", "google_maps", "korea_tourism"
 
     async def execute(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
         if action == "{액션명}":
@@ -124,13 +124,16 @@ print(f"[{클래스명}] HTTP Status: {response.status_code}")
 
 ```python
 service = TravelAgentService({
-    "duffel_flight": FlightAdapter(),
-    "duffel_accommodation": AccommodationAdapter(),
+    "booking": BookingAdapter(),          # 항공·숙소 현역 (RapidAPI booking-com15)
+    "google_maps": GoogleMapsAdapter(),
 })
-result = await service.process_task("duffel_flight", "search_flights", params={...})
+result = await service.process_task("booking", "search_flights", params={...})
 ```
 
-`agent.py`의 `_service` 싱글턴이 모든 어댑터를 보유하며, `@orchestrator_agent.tool_plain`으로 등록된 도구 함수들이 이를 통해 API를 호출한다.
+> 항공·숙소는 현재 `BookingAdapter`(`tool_name="booking"`)가 담당한다.
+> `FlightAdapter`(`duffel_flight`)·`AccommodationAdapter`(`duffel_accommodation`)는 참고용(legacy)으로만 남아 있고 파이프라인에 등록되지 않는다.
+
+`itinerary_pipeline.py`의 `_service` 싱글턴이 모든 어댑터를 보유하며, `@orchestrator_agent.tool_plain`으로 등록된 도구 함수들이 이를 통해 API를 호출한다.
 
 ---
 
@@ -228,7 +231,7 @@ async with agent.run_stream("입력", message_history=history) as result:
 ```python
 from app.core.config import settings
 
-self.api_key = settings.DUFFEL_API_KEY.strip()
+self.api_key = (settings.BOOKING_API_KEY or "").strip()
 ```
 
 ---
@@ -248,7 +251,7 @@ tests/
 
 | 상황 | 방식 |
 |------|------|
-| 외부 API 비용이 낮음 (Duffel, Tavily, Open-Meteo) | 실제 API 호출 통합 테스트 |
+| 외부 API 비용이 낮음 (Booking, Tavily, Open-Meteo) | 실제 API 호출 통합 테스트 |
 | 외부 API 비용이 높거나 키 없이도 로직 검증 가능 | `unittest.mock.patch`로 httpx 모킹 |
 | DB 연결 확인 | `AsyncSessionLocal` 직접 생성, `@pytest.mark.asyncio`, fixture 없음 |
 

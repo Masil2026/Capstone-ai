@@ -1,8 +1,16 @@
 import pytest
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, AsyncMock
 
 from app.services.adapters.booking_api import BookingAdapter
 from app.services.travel_agent_service import TravelAgentService
+
+
+def _status(code, text="rate limited"):
+    mock = Mock()
+    mock.status_code = code
+    mock.text = text
+    mock.json.return_value = {"status": True, "message": "Success", "data": []}
+    return mock
 
 
 def _service():
@@ -289,3 +297,52 @@ async def test_booking_search_flight_location_live():
     selected = result["data"]["selected"]
     assert selected["type"] == "AIRPORT"           # CITY 제외 로직
     assert selected["id"].endswith(".AIRPORT")     # 2-2 입력으로 바로 사용 가능한 형식
+
+
+# ============================== Rate limit (429) ============================== #
+@pytest.mark.asyncio
+async def test_booking_retries_on_429_then_succeeds():
+    """429 발생 시 backoff 후 재시도하여 성공한다."""
+    service = _service()
+    ok = _ok({"data": [
+        {"dest_id": "-716583", "search_type": "city", "dest_type": "city", "name": "서울", "nr_hotels": 100},
+    ]})
+    with patch("httpx.AsyncClient.get", side_effect=[_status(429), ok]), \
+         patch("asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        result = await service.process_task("booking", "search_destination", {"query": "서울"})
+
+    assert result["status"] == "success"
+    assert result["data"]["selected"]["dest_id"] == "-716583"
+    sleep_mock.assert_awaited()  # backoff 대기 발생
+
+
+@pytest.mark.asyncio
+async def test_booking_gives_up_after_max_429():
+    """계속 429면 최대 재시도 후 에러를 반환한다 (무한 루프 없음)."""
+    service = _service()
+    with patch("httpx.AsyncClient.get", return_value=_status(429)) as get_mock, \
+         patch("asyncio.sleep", new=AsyncMock()):
+        result = await service.process_task("booking", "search_destination", {"query": "서울"})
+
+    assert result["status"] == "error"
+    assert "429" in result["message"]
+    assert get_mock.call_count == 4  # 최초 1 + 재시도 3
+
+
+@pytest.mark.asyncio
+async def test_booking_no_retry_on_monthly_quota():
+    """월 쿼터 소진 429는 재시도해도 무의미하므로 즉시 포기한다 (backoff 낭비 방지)."""
+    quota = Mock()
+    quota.status_code = 429
+    quota.text = '{"message":"You have exceeded the MONTHLY quota for requests on your current plan, BASIC."}'
+    quota.headers = {"x-ratelimit-requests-limit": "50", "x-ratelimit-requests-remaining": "-2"}
+    quota.json.return_value = {"status": True, "data": []}
+
+    service = _service()
+    with patch("httpx.AsyncClient.get", return_value=quota) as get_mock, \
+         patch("asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        result = await service.process_task("booking", "search_destination", {"query": "서울"})
+
+    assert result["status"] == "error"
+    assert get_mock.call_count == 1       # 재시도 없이 1회로 종료
+    sleep_mock.assert_not_awaited()       # backoff 대기도 없음

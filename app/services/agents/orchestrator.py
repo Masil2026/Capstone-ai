@@ -108,73 +108,33 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
     "reservation": """\
 ## 이번 요청: 예약 (reservation)
 
-⚠️ **한 번의 요청에 하나의 항목만 예약 가능하다.** 항공·숙소 동시 예약, 복수 건 일괄 처리 불가.
+⚠️ 이 서비스는 항공·숙소를 **직접 예약하지 않는다.** 예약은 사용자가 제공된 예약 링크에서 직접 완료한다.
+- `reservation` 필드는 **반드시 null**로 둔다. 예약번호·예약완료 문구·예약 시각을 **절대 지어내지 말 것.**
+- "예약이 완료되었습니다" 같은 표현을 **절대 쓰지 않는다.** (실제로 예약되지 않음)
 
----
+**[응답 방법]**
+`## 예약 가능한 항목` 섹션의 **예약 링크(url)를 그대로** 사용자에게 안내한다.
 
-**[Case A] 사용자가 예약할 항목을 명확히 1개 지정한 경우 → 즉시 예약 처리**
-
-아래 응답 형식을 채운다:
-- `reservation.reservation_type`: "flight" 또는 "accommodation"
-- `reservation.detail`: **반드시 JSON 객체(dict). 문자열 금지.**
-  숙소: {"name":"숙소명", "check_in":"YYYY-MM-DD", "check_out":"YYYY-MM-DD", "rooms":1, "guests":인원수}
-  항공: {"airline":"항공사명", "departure":"출발IATA", "arrival":"도착IATA", "departing_at":"ISO8601", "arriving_at":"ISO8601", "stops":0}
-- `reservation.total_price`: 숫자 (현지 통화 기준)
-- `reservation.currency`: 통화 코드 (예: "EUR", "JPY", "USD")
-- `reservation.external_ref_id`: 예약번호를 직접 생성. 형식: 숙소는 HTL-YYYYMMDD-XXXXXX, 항공은 FLT-YYYYMMDD-XXXXXX (X는 대문자+숫자 6자리).
-  예) "HTL-20260510-A3K9PQ", "FLT-20260601-B7XM2R"
-- `reservation.booking_url`: 예약 확인 URL을 직접 생성. 형식: https://booking.tripai.app/{stays 또는 flights}/{external_ref_id}
-  예) "https://booking.tripai.app/stays/HTL-20260510-A3K9PQ"
-- `reservation.reserved_at`: 현재 시각 ISO 8601. 예) "2026-05-11T14:30:00+09:00"
-- `message`: 예약 완료 안내. 숙소명/항공편 + 날짜 + 예약번호 + 금액 + 예약 URL 포함.
-  예) "Mystery Hotel Budapest 5월 10일~14일(4박) 예약이 완료되었습니다. 예약번호: HTL-20260510-A3K9PQ / 총 요금: 600.0 EUR (약 876,000원)\n예약 확인: https://booking.tripai.app/stays/HTL-20260510-A3K9PQ"
-
----
-
-**[Case B] 사용자가 "예약해줘" 등 항목을 특정하지 않은 경우 → 후보 목록 안내 후 선택 유도**
-
-`reservation` 필드는 **null**로 둔다.
-`message`에 아래 내용을 담는다:
-1. 현재 여행 일정(## 현재 여행 기본 정보 > ### 기존 일정)에서 예약 가능한 후보를 번호 목록으로 추출한다.
-   - 항공편: 이동 항목에서 추출 — "항공사명, 출발지 → 도착지, 출발 날짜/시각" 형식으로 표시
-   - 숙소: 체크인 항목에서 추출 — "숙소명, 체크인 ~ 체크아웃" 형식으로 표시
-2. 목록 마지막에 반드시 다음 문장을 추가한다:
-   "어떤 항목을 예약해드릴까요? 시스템 특성상 한 번에 하나씩만 처리할 수 있습니다 😊"
-3. 이미 예약 완료된 항목(## 활성 예약 목록에 있는 항목)은 후보 목록에서 제외하고 "(이미 예약됨)"으로 표시한다.""",
+- 사용자가 예약할 항목(항공/숙소)을 명확히 지정한 경우:
+  해당 항목의 예약 링크를 제시하고, "아래 링크에서 직접 예약을 완료해 주세요" 형식으로 안내한다.
+  예) "대한항공 ICN→NRT (5/1) 편은 아래 링크에서 예약하실 수 있어요.\n예약하기: <예약 링크>"
+- 사용자가 "예약해줘"처럼 항목을 특정하지 않은 경우:
+  `## 예약 가능한 항목`의 항목들을 번호 목록(항목명 + 예약 링크)으로 보여주고,
+  "어떤 항목을 예약하시겠어요? 링크를 통해 직접 예약을 완료하시면 됩니다 😊"로 마무리한다.
+- 예약 링크가 있는 항목이 없으면, 아직 예약 가능한 항공/숙소 정보가 없다고 안내한다.""",
 
     "cancel": """\
 ## 이번 요청: 예약 취소 (cancel)
 
-⚠️ **한 번의 요청에 하나의 항목만 취소 가능하다.** 복수 건 일괄 취소 불가.
+⚠️ 이 서비스는 예약을 **직접 취소하지 않는다.** 취소는 사용자가 실제로 예약한 곳에서 직접 진행해야 한다.
+- `cancel` 필드는 **반드시 null**로 둔다. 취소 완료 문구·취소 시각을 **절대 지어내지 말 것.**
+- "취소되었습니다/취소 처리되었습니다" 같은 표현을 **절대 쓰지 않는다.** (실제로 취소되지 않음)
 
----
-
-**[Case A] 사용자가 취소할 항목을 명확히 1개 지정한 경우 → 즉시 취소 처리**
-
-- `cancel.reservation_id`: **반드시 ## 활성 예약 목록의 id(UUID) 값 그대로 사용. 직접 생성 금지.**
-- `cancel.cancelled_at`: 현재 시각 ISO 8601 (예: "2026-05-11T14:30:00+09:00")
-- `message`: 취소 완료 안내. 숙소명/항공편 + 예약번호 포함.
-  예) "Mystery Hotel Budapest(예약번호: HTL-20260510-A3K9PQ) 예약이 취소 처리되었습니다."
-
----
-
-**[Case B] 사용자가 "취소해줘" 등 항목을 특정하지 않은 경우 → 예약 목록 안내 후 선택 유도**
-
-`cancel` 필드는 **null**로 둔다.
-`message`에 아래 내용을 담는다:
-1. ## 활성 예약 목록의 항목을 번호 목록으로 보여준다.
-   - 형식: "번호. [항공/숙소] 항목명 | 예약번호 | 금액"
-   - 예) "1. [항공] 대한항공 ICN→NRT (2026-05-01) | 예약번호: FLT-20260501-B7XM2R | 320,000원"
-   - 예) "2. [숙소] 롯데호텔 도쿄 (5/1~5/3) | 예약번호: HTL-20260501-A3K9PQ | 450,000원"
-2. 목록 마지막에 반드시 다음 문장을 추가한다:
-   "어떤 항목을 취소해드릴까요? 시스템 특성상 한 번에 하나씩만 처리할 수 있습니다 😊"
-
----
-
-**[Case C] 활성 예약 목록이 비어있는 경우**
-
-`cancel` 필드는 **null**로 두고, message에 안내한다.
-예) "취소할 수 있는 예약 내역이 없습니다." """,
+**[응답 방법]**
+`message`에, 예약은 사용자가 예약을 완료한 곳(항공사·숙소 공식 사이트 또는 예약 시 사용한 예약 사이트)에서
+직접 취소해야 한다고 안내한다. 각 예약처의 취소 규정·수수료는 해당 사이트에서 확인하도록 덧붙인다.
+예) "예약 취소는 예약을 진행하신 항공사/숙소(또는 예약 사이트)에서 직접 진행하셔야 해요. "
+    "취소 규정과 수수료는 예약처에서 확인하실 수 있습니다.\"""",
 
     "chat": """\
 ## 이번 요청: 일반 대화/질문 (chat)
@@ -284,8 +244,25 @@ def build_context_prompt(deps: OrchestratorDeps) -> str:
                             section_lines.append(
                                 f"  - {item.get('time','')} {item.get('plan_name','')} ({item.get('place','')})"
                             )
+            elif deps.request_type == "reservation":
+                # 예약 가능한 항목(딥링크 url 보유 항공·숙소)만 추출해 링크와 함께 노출.
+                # url은 파이프라인 후처리로 항공(검색 리스트)·숙소(예약 페이지)에만 주입됨.
+                seen_urls: set[str] = set()
+                resv_lines: list[str] = []
+                for date_key, items in day_plans.items():
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        if isinstance(item, dict) and item.get("url") and item["url"] not in seen_urls:
+                            seen_urls.add(item["url"])
+                            resv_lines.append(f"- {item.get('plan_name','')} | 예약 링크: {item['url']}")
+                if resv_lines:
+                    section_lines.append("### 예약 가능한 항목 (아래 예약 링크를 그대로 사용자에게 안내)")
+                    section_lines.extend(resv_lines)
+                else:
+                    section_lines.append("### 예약 가능한 항목\n- 예약 링크가 있는 항목이 없습니다.")
             else:
-                # reservation·cancel·itinerary: 날짜 + 활동 수 요약만
+                # cancel·itinerary: 날짜 + 활동 수 요약만
                 section_lines.append("### 기존 일정 요약")
                 for date_key, items in day_plans.items():
                     count = len(items) if isinstance(items, list) else 0
@@ -457,79 +434,7 @@ async def search_place(query: str) -> dict:
         "query": query,
     })
 
-
-# ---------------------------------------------------------------------------
-# 예약/취소 실행 도구 (Duffel API 미구현 — placeholder)
-# ---------------------------------------------------------------------------
-
-@orchestrator_agent.tool_plain
-async def book_flight(
-    origin: str,
-    destination: str,
-    departure_date: str,
-    adults: int = 1,
-    children: int = 0,
-    child_ages: list[int] | None = None,
-) -> dict:
-    """항공권 검색 + 예약을 한 번에 처리. reservation 타입 전용.
-
-    내부 동작: search_flights로 옵션 조회 → 최적 항공편 선택 → Duffel create_order 호출
-    LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
-
-    - origin/destination: **반드시 영문 도시명**으로 전달할 것.
-      현재 여행 정보의 destinations 배열에서 해당 도시의 영문명을 추출해 사용한다.
-      예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
-          "(오사카, Osaka)" → "Osaka"  |  "Osaka"처럼 영문이면 그대로 사용
-    - departure_date: YYYY-MM-DD 형식
-    - children >= 1이면 child_ages 개수 일치 필요. 예) children=2, child_ages=[5, 8]
-    - 반환: {status: "todo"} — FlightAdapter.create_order 연결 후 실제 예약 처리 예정
-    """
-    return {"status": "todo", "message": "항공권 예약 API는 현재 개발 중입니다."}
-
-
-@orchestrator_agent.tool_plain
-async def book_hotel(
-    city_name: str,
-    check_in: str,
-    check_out: str,
-    adults: int = 1,
-    rooms: int = 1,
-    children: int = 0,
-    child_ages: list[int] | None = None,
-) -> dict:
-    """숙소 검색 + 예약을 한 번에 처리. reservation 타입 전용.
-
-    내부 동작: search_hotels로 옵션 조회 → 최적 숙소 선택 → Duffel create_booking 호출
-    LLM이 search/book을 분리해서 호출할 필요 없이 이 도구 하나로 완료.
-
-    - city_name: **반드시 영문 도시명**으로 전달할 것.
-      현재 여행 정보의 destinations 배열에서 해당 도시의 영문명을 추출해 사용한다.
-      예) "서울" → "Seoul"  |  "도쿄" → "Tokyo"  |  "인천, incheon" → "Incheon"
-          "(오사카, Osaka)" → "Osaka"  |  "방콕" → "Bangkok"
-    - check_in/check_out: YYYY-MM-DD 형식
-    - children >= 1이면 child_ages 개수 일치 필요. 예) children=1, child_ages=[7]
-    - 반환: {status: "todo"} — AccommodationAdapter.create_booking 연결 후 실제 예약 처리 예정
-    """
-    return {"status": "todo", "message": "숙소 예약 API는 현재 개발 중입니다."}
-
-
-@orchestrator_agent.tool_plain
-async def cancel_flight(order_id: str) -> dict:
-    """항공권 예약 취소. Duffel Air order_id로 항공권 취소 요청.
-
-    - order_id: 취소할 항공권 예약의 Duffel order ID (book_flight 또는 예약 완료 시 반환된 ID)
-    - 반환: {status: "todo"} — FlightAdapter.cancel_booking 연결 후 실제 취소 처리 예정
-    """
-    return {"status": "todo", "message": "항공권 취소 API는 현재 개발 중입니다."}
-
-
-@orchestrator_agent.tool_plain
-async def cancel_hotel(booking_id: str) -> dict:
-    """숙소 예약 취소. Duffel Stays booking_id로 숙소 취소 요청.
-
-    - booking_id: 취소할 숙소 예약의 Duffel booking ID (book_hotel 또는 예약 완료 시 반환된 ID)
-    - 반환: {status: "todo"} — AccommodationAdapter.cancel_booking 연결 후 실제 취소 처리 예정
-    """
-    return {"status": "todo", "message": "숙소 취소 API는 현재 개발 중입니다."}
+# 예약/취소는 orchestrator 프롬프트(reservation·cancel 타입)가 구조화 출력으로 직접 처리한다.
+# (Booking은 조회·딥링크 전용이라 실제 예약 실행 API가 없음 — 별도 book/cancel 도구를 두지 않는다.)
 
 

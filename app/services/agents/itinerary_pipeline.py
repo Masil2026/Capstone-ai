@@ -27,17 +27,17 @@ from pydantic_ai import Agent
 
 from app.core.config import settings
 from app.schemas.ai_message import OrchestratorResult
-from app.services.adapters.accommodation_api import AccommodationAdapter
-from app.services.adapters.flight_api import FlightAdapter
+from app.services.adapters.booking_api import BookingAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
+from app.services.adapters.korea_tourism_api import KoreaTourismAdapter
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.travel_agent_service import TravelAgentService
 from ._base import _build_model, preprocessor_agent, run_with_retry, _is_rate_limit_error, _retry_wait
 
 _service = TravelAgentService({
-    "duffel_flight":        FlightAdapter(),
-    "duffel_accommodation": AccommodationAdapter(),
+    "booking":              BookingAdapter(),
+    "korea_tourism":        KoreaTourismAdapter(),
     "tavily_search":        TavilySearchAdapter(),
     "weather":              WeatherAdapter(),
     "google_maps":          GoogleMapsAdapter(),
@@ -66,6 +66,10 @@ def _is_day_trip(itinerary: dict) -> bool:
 
 
 _TRANSPORT_KEYWORDS = frozenset({"항공 이동", "기내 (비행 중)"})
+
+# 숙소 예약 URL을 붙일 실제 '숙박 성격' 항목을 가리는 키워드.
+# 이동 경로·식사 항목이 place에 호텔명을 우연히 포함해도 예약 링크가 붙지 않도록 한다.
+_LODGING_URL_WORDS = ("체크인", "체크아웃", "숙박", "귀환", "휴식", "입실", "퇴실")
 
 
 def _is_transport_day(items: list) -> bool:
@@ -441,16 +445,13 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         data = leg["data"]
         if data.get("status") == "success":
             offers = data.get("data", [])
-            is_fallback = data.get("is_duffel_fallback", False)
             if offers:
-                if is_fallback:
-                    lines.append("  ⚠️ [DUFFEL FALLBACK] 실제 항공사 결과 없음 — Duffel Airways(테스트용 가상 항공사) 결과를 대신 사용. 이 구간은 반드시 selected_flights에 포함할 것. 임의로 다른 항공사를 만들어 넣지 말 것.")
                 for f in offers[:6]:
                     lines.append(
                         f"  - {f.get('airline')} | {f.get('origin')}→{f.get('destination')} | "
                         f"{f.get('departing_at','')} ~ {f.get('arriving_at','')} | "
                         f"비행시간 {f.get('duration','?')} | "
-                        f"{f.get('price_original','?')} {f.get('currency','?')} ({f.get('price_krw',0):,}원) | {f.get('stops',0)}회 경유"
+                        f"{f.get('price_krw',0):,}원 | {f.get('stops',0)}회 경유"
                     )
             else:
                 lines.append("  - ⚠️ 실시간 항공편 없음 — 이 구간은 selected_flights에 절대 포함하지 말 것. 임의로 항공편을 만들어 넣지 말 것.")
@@ -708,6 +709,10 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "⚠️ cost=null은 진짜 무료인 경우만. 금액 모를 때도 null. 절대 0 금액 쓰지 말 것.",
         "⚠️ currency='KRW'이면 amount_krw 필드를 절대 작성하지 말 것 (생략 = null).",
         "⚠️ 식사·교통·입장료는 amount_krw 절대 작성 금지 — 서버가 자동 환산함.",
+        "⚠️ 식사·교통·입장료 등 현지 추정 비용의 currency는 반드시 그 활동이 일어나는 "
+        "**도시의 현지 통화**로 통일한다. 임의로 USD를 쓰지 말 것(미국 외 목적지에 USD 금지). "
+        "예) 시드니·호주=AUD, 도쿄=JPY, 파리·유럽=EUR, 방콕=THB, 토론토·캐나다=CAD, 국내=KRW. "
+        "같은 도시 안의 항목들은 통화가 서로 달라선 안 된다.",
         "",
         "- 항공 이동 항목: API 검색 결과의 price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  ⚠️ '선택된 항공편' 섹션에서 해당 leg_index의 price_original·currency·price_krw를 반드시 찾아 기재.",
@@ -970,6 +975,63 @@ async def _fetch_weather_all(destinations: list[dict], today: str) -> dict[str, 
     }
 
 
+def _fmt_flight_duration(total_sec: int | None) -> str:
+    """초 → 'Hh MMm' 표시 문자열."""
+    if not total_sec:
+        return "?"
+    h, m = divmod(int(total_sec) // 60, 60)
+    return f"{h}h {m:02d}m"
+
+
+def _normalize_booking_flights(raw: Any) -> dict:
+    """Booking search_flights 응답을 기존 파이프라인 평면 shape로 정규화한다.
+
+    Booking offer(segments 구조) → {airline, origin, destination, departing_at,
+    arriving_at, price_krw, price_original, currency, stops, duration}
+    + image_url(대표 항공사 로고) · url(검색 리스트 URL) · token 추가.
+    """
+    if isinstance(raw, Exception) or not isinstance(raw, dict) or raw.get("status") != "success":
+        msg = str(raw) if isinstance(raw, Exception) else (raw.get("message") if isinstance(raw, dict) else "검색 실패")
+        return {"status": "error", "data": [], "count": 0, "message": msg}
+
+    data = raw.get("data") or {}
+    list_url = data.get("booking_list_url")
+    flat: list[dict] = []
+    for o in (data.get("flights") or []):
+        segs = o.get("segments") or []
+        if not segs:
+            continue
+        first_seg, last_seg = segs[0], segs[-1]
+        first_leg = (first_seg.get("legs") or [{}])[0] or {}
+        carriers = first_leg.get("carriers") or []
+        total_legs = sum(len(s.get("legs") or []) for s in segs)
+        total_sec = sum((s.get("total_time_sec") or 0) for s in segs)
+        price = o.get("price")
+        flat.append({
+            "token": o.get("token"),
+            "price_original": price,           # Booking은 KRW 통화 고정
+            "currency": o.get("currency") or "KRW",
+            "price_krw": price,
+            "airline": carriers[0] if carriers else None,
+            "origin": first_seg.get("from"),
+            "destination": last_seg.get("to"),
+            "departing_at": first_seg.get("departure_time"),
+            "arriving_at": last_seg.get("arrival_time"),
+            "stops": max(total_legs - 1, 0),
+            "duration": _fmt_flight_duration(total_sec),
+            "image_url": first_leg.get("logo"),   # 대표 항공사 로고
+            "url": list_url,                       # 검색 리스트 URL (편 무관)
+        })
+    # 경유 적고 저렴한 순 정렬
+    flat.sort(key=lambda x: (x["stops"], x["price_krw"] if x["price_krw"] is not None else float("inf")))
+    return {
+        "status": "success" if flat else "error",
+        "data": flat,
+        "count": len(flat),
+        "booking_list_url": list_url,
+    }
+
+
 async def _fetch_flight_legs(
     destinations: list[dict],
     cities_en: list[str],
@@ -977,48 +1039,86 @@ async def _fetch_flight_legs(
     children: int,
     child_ages: list,
 ) -> list[dict]:
-    """모든 항공 구간을 병렬로 검색한다.
+    """모든 항공 구간을 Booking으로 병렬 검색한다.
 
     구간 구성 (N개 도시):
       leg 0       : 한국(Seoul) → cities_en[0]          depart
       leg 1..N-1  : cities_en[i-1] → cities_en[i]       connect
       leg N       : cities_en[-1] → 한국(Seoul)          return
+
+    Booking 항공은 2단계: search_flight_location(도시→공항ID) → search_flights.
     """
+    children_csv = ",".join(str(a) for a in (child_ages or []))
+
+    def _is_korea(country: str | None) -> bool:
+        c = (country or "")
+        return "korea" in c.lower() or "대한민국" in c
+
+    # 1) 등장하는 모든 도시의 공항 정보를 한 번씩만 병렬 해석 (중복 호출 방지)
+    #    selected(기본 공항) + is_korea(국가) + gmp_id(김포 후보, 사실상 서울만 보유)
+    unique_cities = list(dict.fromkeys([_DEFAULT_ORIGIN, *cities_en]))
+    loc_results = await asyncio.gather(
+        *[_service.process_task("booking", "search_flight_location", {"query": c}) for c in unique_cities],
+        return_exceptions=True,
+    )
+    airport_info: dict[str, dict] = {}
+    for city, r in zip(unique_cities, loc_results):
+        if not isinstance(r, Exception) and isinstance(r, dict) and r.get("status") == "success":
+            data = r.get("data") or {}
+            sel = data.get("selected") or {}
+            cands = data.get("candidates") or []
+            gmp_id = next((c.get("id") for c in cands if c.get("code") == "GMP"), None)
+            airport_info[city] = {
+                "id": sel.get("id"),
+                "is_korea": _is_korea(sel.get("country")),
+                "gmp_id": gmp_id,
+            }
+
+    def _pick_airport(city: str, other_is_korea: bool) -> str | None:
+        """국내 노선(양쪽 다 한국)이면 서울쪽은 김포(GMP) 우선 — ICN 국제선 오선택 방지."""
+        info = airport_info.get(city) or {}
+        if other_is_korea and info.get("is_korea") and info.get("gmp_id"):
+            return info["gmp_id"]
+        return info.get("id")
+
+    async def _search(from_city: str, to_city: str, depart_date: str) -> dict:
+        from_korea = (airport_info.get(from_city) or {}).get("is_korea", False)
+        to_korea = (airport_info.get(to_city) or {}).get("is_korea", False)
+        from_id = _pick_airport(from_city, to_korea)
+        to_id = _pick_airport(to_city, from_korea)
+        if not from_id or not to_id:
+            return {"status": "error", "data": [], "count": 0,
+                    "message": f"공항 ID 해석 실패: {from_city}→{to_city}"}
+        query = {"fromId": from_id, "toId": to_id, "departDate": depart_date, "adults": adults}
+        if children_csv:
+            query["children"] = children_csv
+        raw = await _service.process_task("booking", "search_flights", query)
+        return _normalize_booking_flights(raw)
+
     leg_info: list[dict] = []
     tasks = []
 
     # Depart
-    tasks.append(_service.process_task("duffel_flight", "search_flights", {
-        "origin": _DEFAULT_ORIGIN,
-        "destination": cities_en[0],
-        "departure_date": destinations[0]["start_date"][:10],
-        "adults": adults, "children": children, "child_ages": child_ages,
-    }))
+    tasks.append(_search(_DEFAULT_ORIGIN, cities_en[0], destinations[0]["start_date"][:10]))
     leg_info.append({"leg_index": 0, "direction": "depart", "from": _DEFAULT_ORIGIN, "to": cities_en[0]})
 
     # Connect legs
     for i in range(1, len(destinations)):
-        tasks.append(_service.process_task("duffel_flight", "search_flights", {
-            "origin": cities_en[i - 1],
-            "destination": cities_en[i],
-            "departure_date": destinations[i]["start_date"][:10],
-            "adults": adults, "children": children, "child_ages": child_ages,
-        }))
+        tasks.append(_search(cities_en[i - 1], cities_en[i], destinations[i]["start_date"][:10]))
         leg_info.append({"leg_index": i, "direction": "connect", "from": cities_en[i - 1], "to": cities_en[i]})
 
-    # Return — end_date와 end_date-1 양쪽 검색 후 합산 (장거리 노선 대응)
+    # Return — 귀국편 검색 날짜 결정
+    #  국제/장거리: end_date 당일 편이 없거나 익일 도착일 수 있어 end_date와 전날 양쪽 검색.
+    #  국내 단거리(양쪽 다 한국): 당일 왕복이 기본이므로 end_date 하루만 검색
+    #    (마지막 날을 통째로 날리는 전날 귀국편이 후보에 섞이는 것을 방지).
     end_dt = datetime.strptime(destinations[-1]["end_date"][:10], "%Y-%m-%d").date()
-    return_common = {
-        "origin": cities_en[-1],
-        "destination": _DEFAULT_ORIGIN,
-        "adults": adults, "children": children, "child_ages": child_ages,
-    }
-    tasks.append(_service.process_task("duffel_flight", "search_flights", {
-        **return_common, "departure_date": str(end_dt),
-    }))
-    tasks.append(_service.process_task("duffel_flight", "search_flights", {
-        **return_common, "departure_date": str(end_dt - timedelta(days=1)),
-    }))
+    return_from_korea = (airport_info.get(cities_en[-1]) or {}).get("is_korea", False)
+    return_to_korea = (airport_info.get(_DEFAULT_ORIGIN) or {}).get("is_korea", False)
+    is_domestic_return = return_from_korea and return_to_korea
+    return_dates = [str(end_dt)] if is_domestic_return else [str(end_dt), str(end_dt - timedelta(days=1))]
+    n_return = len(return_dates)
+    for d in return_dates:
+        tasks.append(_search(cities_en[-1], _DEFAULT_ORIGIN, d))
     return_leg_info = {
         "leg_index": len(destinations), "direction": "return",
         "from": cities_en[-1], "to": _DEFAULT_ORIGIN,
@@ -1026,16 +1126,16 @@ async def _fetch_flight_legs(
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # 귀국편 두 날짜 결과 병합
-    non_return = results[:-2]
-    r_end, r_prev = results[-2], results[-1]
-    data_end = r_end.get("data", []) if not isinstance(r_end, Exception) and r_end.get("status") == "success" else []
-    data_prev = r_prev.get("data", []) if not isinstance(r_prev, Exception) and r_prev.get("status") == "success" else []
-    merged_data = data_end + data_prev
+    # 귀국편 결과 병합 (국내선 1개 날짜 / 국제선 2개 날짜)
+    non_return = results[:-n_return]
+    merged_data: list = []
+    for r in results[-n_return:]:
+        if not isinstance(r, Exception) and isinstance(r, dict) and r.get("status") == "success":
+            merged_data += r.get("data", [])
 
     # end_date 이내 도착편만 남김 (arriving_at[:10] <= end_date)
     end_date_str = str(end_dt)
-    valid_data = [f for f in merged_data if f.get("arriving_at", "")[:10] <= end_date_str]
+    valid_data = [f for f in merged_data if (f.get("arriving_at") or "")[:10] <= end_date_str]
     if valid_data:
         if len(valid_data) < len(merged_data):
             _log.info(
@@ -1062,6 +1162,32 @@ async def _fetch_flight_legs(
     return legs
 
 
+def _normalize_booking_hotels(raw: Any) -> dict:
+    """Booking search_hotels 응답을 기존 파이프라인 평면 shape로 정규화한다.
+
+    {name, address, price_krw, rating} + image_url(photo)·hotel_id·star 추가.
+    url(booking_url)은 선택 호텔에 대해서만 join 단계에서 get_hotel_details로 채운다.
+    """
+    if isinstance(raw, Exception) or not isinstance(raw, dict) or raw.get("status") != "success":
+        msg = str(raw) if isinstance(raw, Exception) else (raw.get("message") if isinstance(raw, dict) else "검색 실패")
+        return {"status": "error", "data": [], "count": 0, "message": msg}
+
+    hotels = ((raw.get("data") or {}).get("hotels")) or []
+    flat = [{
+        "hotel_id": h.get("hotel_id"),
+        "name": h.get("name"),
+        "address": h.get("summary") or "",   # 검색 응답엔 정식 주소 없음 → 요약(위치 라벨) 사용
+        "price_original": h.get("price"),    # Booking은 KRW 통화 고정
+        "currency": "KRW",
+        "price_krw": h.get("price"),
+        "rating": h.get("review_score"),
+        "star": h.get("star"),
+        "image_url": h.get("photo"),
+        "url": None,
+    } for h in hotels]
+    return {"status": "success" if flat else "error", "data": flat, "count": len(flat)}
+
+
 async def _fetch_hotels(
     city_en: str,
     start_date: str,
@@ -1070,17 +1196,30 @@ async def _fetch_hotels(
     children: int,
     child_ages: list,
 ) -> dict:
+    """Booking 2단계: search_destination(도시→dest_id) → search_hotels."""
     try:
-        return await _service.process_task("duffel_accommodation", "search_hotels", {
-            "city_name": city_en,
-            "check_in": start_date[:10],
-            "check_out": end_date[:10],
+        loc = await _service.process_task("booking", "search_destination", {"query": city_en})
+        if not isinstance(loc, dict) or loc.get("status") != "success":
+            return {"status": "error", "data": [],
+                    "message": (loc.get("message") if isinstance(loc, dict) else f"{city_en} 지역 검색 실패")}
+        sel = (loc.get("data") or {}).get("selected") or {}
+        dest_id, search_type = sel.get("dest_id"), sel.get("search_type")
+        if not dest_id or not search_type:
+            return {"status": "error", "data": [], "message": f"{city_en} dest_id 해석 실패"}
+
+        query = {
+            "dest_id": dest_id,
+            "search_type": search_type,
+            "arrival_date": start_date[:10],
+            "departure_date": end_date[:10],
             "adults": adults,
-            "children": children,
-            "child_ages": child_ages,
-        })
+        }
+        if child_ages:
+            query["children_age"] = ",".join(str(a) for a in child_ages)
+        raw = await _service.process_task("booking", "search_hotels", query)
+        return _normalize_booking_hotels(raw)
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "data": [], "message": str(e)}
 
 
 async def _fetch_hotels_all(
@@ -1109,20 +1248,91 @@ async def _no_hotels(destinations: list[dict]) -> dict[str, dict]:
 
 # ── Phase 3 헬퍼 함수들 ──────────────────────────────────────────────────
 
+def _norm_place(s: str | None) -> str:
+    return re.sub(r"\s+", "", (s or "")).lower()
+
+
+_KOREA_SKIP_WORDS = ("식사", "맛집", "근처", "이동", "점심", "저녁", "아침", "브런치", "야식", "야시장", "카페")
+
+
+def _korea_keyword(query: str, city_kr: str | None) -> str | None:
+    """Google용 ordered_query('장소명 도시명 (영문)')에서 한국관광공사 검색용 장소명만 추출.
+
+    - 끝의 '(영문)' 괄호와 도시명(제주도/제주 등)을 제거
+    - 식사·이동 등 서술형 검색어는 한국관광공사 대상이 아니므로 None (스킵)
+    예) '비자림 제주 (Jeju)' → '비자림' / '저녁식사 흑돼지 제주 (Jeju)' → None
+    """
+    q = re.sub(r"\s*\([^)]*\)\s*$", "", query or "").strip()
+    variants = set()
+    if city_kr:
+        variants.add(city_kr)
+        variants.add(re.sub(r"(특별자치도|광역시|특별시|도|시)$", "", city_kr))
+    for v in sorted((v for v in variants if v), key=len, reverse=True):
+        q = q.replace(v, " ")
+    q = re.sub(r"\s+", " ", q).strip()
+    if not q or any(w in q for w in _KOREA_SKIP_WORDS):
+        return None
+    return q
+
+
+def _korea_pick_image(raw: Any, query: str) -> tuple[str | None, str | None]:
+    """한국관광공사 검색 결과에서 query와 확신 매칭되는 항목의 (image_url, contentid).
+
+    image_url = firstimage 우선 → 없으면 firstimage2 → 둘 다 없으면 None.
+    매칭 실패 시 (None, None) — 해외 장소는 결과가 비어 자연히 매칭 안 됨.
+    """
+    if not isinstance(raw, dict) or raw.get("status") != "success":
+        return (None, None)
+    items = ((raw.get("data") or {}).get("items")) or []
+    nq = _norm_place(query)
+    for it in items:
+        nt = _norm_place(it.get("title"))
+        if nt and (nt in nq or nq in nt):
+            img = it.get("firstimage") or it.get("firstimage2")
+            return (img or None, it.get("contentid"))
+    if len(items) == 1:  # 결과가 하나뿐이면 그 항목으로 간주
+        it = items[0]
+        return (it.get("firstimage") or it.get("firstimage2") or None, it.get("contentid"))
+    return (None, None)
+
+
 async def _fetch_places(planner_output: PlannerOutput) -> dict[str, dict]:
     queries: list[str] = []
+    query_city: dict[str, str] = {}
     for day in planner_output.days:
+        for q in day.ordered_queries:
+            query_city.setdefault(q, day.city)
         queries.extend(day.ordered_queries)
     queries = list(dict.fromkeys(queries))  # 순서 유지 중복 제거
 
-    results = await asyncio.gather(
-        *[_service.process_task("google_maps", "search_place", {"query": q}) for q in queries],
-        return_exceptions=True,
+    # ordered_query는 Google용('장소명 도시명 (영문)') → 한국관광공사는 장소명만 추출해 검색
+    korea_keywords = [_korea_keyword(q, query_city.get(q)) for q in queries]
+
+    async def _korea_call(kw: str | None):
+        if not kw:  # 식사·이동 등은 한국관광공사 대상 아님 → 스킵
+            return {"status": "skip"}
+        return await _service.process_task("korea_tourism", "search_keyword", {"keyword": kw, "numOfRows": 5})
+
+    # google_maps(장소·평점)와 korea_tourism(국내 이미지)을 병렬 호출 — 해외는 korea가 빈 결과
+    google_res, korea_res = await asyncio.gather(
+        asyncio.gather(
+            *[_service.process_task("google_maps", "search_place", {"query": q}) for q in queries],
+            return_exceptions=True,
+        ),
+        asyncio.gather(
+            *[_korea_call(kw) for kw in korea_keywords],
+            return_exceptions=True,
+        ),
     )
-    return {
-        q: (r if not isinstance(r, Exception) else {"status": "error"})
-        for q, r in zip(queries, results)
-    }
+
+    result: dict[str, dict] = {}
+    for q, kw, g, k in zip(queries, korea_keywords, google_res, korea_res):
+        entry = dict(g) if not isinstance(g, Exception) and isinstance(g, dict) else {"status": "error"}
+        image_url, contentid = _korea_pick_image(k, kw or q)   # 정제된 장소명으로 매칭
+        entry["image_url"] = image_url      # 한국관광공사 firstimage (없으면 None)
+        entry["contentid"] = contentid
+        result[q] = entry
+    return result
 
 
 _ATTRACTION_TYPES = frozenset({
@@ -1334,6 +1544,142 @@ def _normalize_overnight_day_plans(day_plans: dict[str, list]) -> dict[str, list
     return {date_key: items for date_key, items in sorted(normalized.items())}
 
 
+def _item_get(item: Any, key: str) -> Any:
+    return item.get(key) if isinstance(item, dict) else getattr(item, key, None)
+
+
+def _item_set(item: Any, key: str, value: Any) -> None:
+    if isinstance(item, dict):
+        item[key] = value
+    else:
+        setattr(item, key, value)
+
+
+async def _attach_media(
+    day_plans: dict[str, list],
+    planner_output: PlannerOutput,
+    place_results: dict[str, dict],
+    flight_legs: list[dict],
+    hotels_by_city: dict,
+    adults: int,
+    child_ages: list,
+) -> dict[str, list]:
+    """day_plans 아이템에 image_url·url을 파이썬 후처리로 주입한다 (LLM 미개입).
+
+    - 항공: selected_flights를 flight_legs 원본과 대조해 로고(image_url)·검색 리스트 URL(url) 역참조
+    - 숙소: selected_hotels를 hotels_by_city 원본과 대조해 사진(image_url), 선택 호텔만 get_hotel_details로 booking_url(url)
+    - 장소: place_results의 한국관광공사 firstimage를 이름 매칭으로 부여
+    매칭은 이름 기반 best-effort — 실패 시 image_url·url = None 유지.
+    """
+    # 1) 항공: (norm_airline, origin_code, dest_code, image_url, url)
+    #    같은 항공사가 여러 구간(출발·귀국)에 쓰이면 항공사명만으로는 방향 구분이 안 되므로
+    #    출발/도착 공항코드(GMP·CJU 등)의 등장 순서로 leg를 특정한다.
+    flight_media: list[tuple[str, str, str, str | None, str | None]] = []
+    for fl in planner_output.selected_flights:
+        offers = next(
+            (leg.get("data", {}).get("data") or [] for leg in flight_legs if leg.get("leg_index") == fl.leg_index),
+            [],
+        )
+        src = next(
+            (o for o in offers if o.get("airline") == fl.airline and o.get("departing_at") == fl.departing_at),
+            (offers[0] if offers else None),
+        )
+        if fl.airline and src:
+            flight_media.append((
+                _norm_place(fl.airline),
+                _norm_place(fl.origin),
+                _norm_place(fl.destination),
+                src.get("image_url"),
+                src.get("url"),
+            ))
+
+    # 2) 숙소: booking_url은 선택된 호텔에 대해서만 상세 호출 (비용 최소화)
+    hotel_media: list[tuple[str, str | None, str | None]] = []
+    detail_tasks, detail_meta = [], []
+    for h in planner_output.selected_hotels:
+        src = next(
+            (s for s in (hotels_by_city.get(h.city, {}).get("data") or [])
+             if _norm_place(s.get("name")) == _norm_place(h.name)),
+            None,
+        )
+        image_url = src.get("image_url") if src else None
+        hotel_id = src.get("hotel_id") if src else None
+        if hotel_id:
+            query = {"hotel_id": hotel_id, "arrival_date": h.check_in[:10],
+                     "departure_date": h.check_out[:10], "adults": adults}
+            if child_ages:
+                query["children_age"] = ",".join(str(a) for a in child_ages)
+            detail_tasks.append(_service.process_task("booking", "get_hotel_details", query))
+            detail_meta.append((h.name, image_url))
+        else:
+            hotel_media.append((_norm_place(h.name), image_url, None))
+    if detail_tasks:
+        for (name, image_url), d in zip(detail_meta, await asyncio.gather(*detail_tasks, return_exceptions=True)):
+            url = (d.get("data") or {}).get("booking_url") if isinstance(d, dict) and d.get("status") == "success" else None
+            hotel_media.append((_norm_place(name), image_url, url))
+
+    # 3) 장소: norm(name) → image_url (한국관광공사 firstimage)
+    place_map: dict[str, str] = {}
+    for query, res in place_results.items():
+        img = res.get("image_url")
+        if not img:
+            continue
+        place_map.setdefault(_norm_place(query), img)
+        for p in ((res.get("data") or {}).get("places") or []):
+            nm = _norm_place(p.get("name"))
+            if nm:
+                place_map.setdefault(nm, img)
+
+    def _match(item: Any) -> tuple[str | None, str | None]:
+        plan_name = _item_get(item, "plan_name") or ""
+        hay = _norm_place(plan_name) + "|" + _norm_place(_item_get(item, "place"))
+        # 예약 URL은 실제 숙박 성격 항목(체크인·체크아웃·숙박·귀환·휴식 등)에만 붙인다.
+        # '이동' 경로 항목이나 place에 호텔명이 우연히 들어간 식사 항목엔 붙이지 않는다.
+        # 사진(image)은 목적지 미리보기로 유용하므로 매칭되면 항상 유지한다.
+        is_lodging = "이동" not in plan_name and any(w in plan_name for w in _LODGING_URL_WORDS)
+        for nm, img, url in hotel_media:      # 숙소 우선 (가장 구체적)
+            if nm and nm in hay:
+                return img, (url if is_lodging else None)
+        # 항공: 항공사명이 일치하는 후보 중 아래 우선순위로 leg를 특정한다.
+        #   1) 출발→도착 공항코드가 hay에 순서대로 등장(방향 완전 일치)
+        #   2) 도착 공항코드만 hay에 등장 — '기내 (비행 중)'·'~ 도착' continuation 카드는
+        #      출발 코드가 없어 1)이 실패하므로, 도착지 코드로 해당 leg를 특정
+        #   3) 항공사명만 일치(코드 정보 없음) — 최후 폴백
+        # 같은 항공사가 여러 leg(출발·경유·귀국)에 쓰일 때 1)/2) 없이 항공사명만으로
+        # 매칭하면 항상 첫 leg로 쏠리므로, 2) 계층이 continuation 카드의 오매칭을 막는다.
+        dest_match: tuple[str | None, str | None] | None = None
+        airline_fallback: tuple[str | None, str | None] | None = None
+        for nm, frm, to, img, url in flight_media:
+            if not (nm and nm in hay):
+                continue
+            if frm and to and frm in hay and to in hay and hay.find(frm) < hay.find(to):
+                return img, url
+            if to and to in hay and dest_match is None:
+                dest_match = (img, url)
+            if airline_fallback is None:
+                airline_fallback = (img, url)
+        if dest_match is not None:
+            return dest_match
+        if airline_fallback is not None:
+            return airline_fallback
+        np = _norm_place(_item_get(item, "place"))  # 장소
+        if np and np in place_map:
+            return place_map[np], None
+        for key, img in place_map.items():
+            if key and (key in np or np in key):
+                return img, None
+        return None, None
+
+    for items in day_plans.values():
+        for item in items:
+            img, url = _match(item)
+            if img and not _item_get(item, "image_url"):
+                _item_set(item, "image_url", img)
+            if url and not _item_get(item, "url"):
+                _item_set(item, "url", url)
+    return day_plans
+
+
 async def run_itinerary_pipeline(
     deps,           # OrchestratorDeps
     user_message: str,
@@ -1519,6 +1865,13 @@ async def run_itinerary_pipeline(
     if result.day_plans:
         result = result.model_copy(update={
             "day_plans": _normalize_overnight_day_plans(result.day_plans)
+        })
+        # image_url·url 후처리 주입 (Booking 사진·booking_url / 한국관광공사 firstimage / 항공사 로고)
+        result = result.model_copy(update={
+            "day_plans": await _attach_media(
+                result.day_plans, planner_output, place_results,
+                flight_legs, hotels_by_city, adults, child_ages,
+            )
         })
 
     # ── 예산 초과 확인 — cost 합산 후 초과 시 업데이트 제안 ─────────────
