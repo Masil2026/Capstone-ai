@@ -9,8 +9,7 @@ from typing import Any
 
 import json as _json
 
-import vertexai
-from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
+from google import genai as _genai
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 from sqlalchemy import text
 from google.oauth2 import service_account
@@ -25,7 +24,12 @@ if settings.GOOGLE_APPLICATION_CREDENTIALS:
         settings.GOOGLE_APPLICATION_CREDENTIALS,
         scopes=["https://www.googleapis.com/auth/cloud-platform"],
     )
-vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_REGION, credentials=_creds)
+_genai_client = _genai.Client(
+    vertexai=True,
+    project=settings.GOOGLE_CLOUD_PROJECT,
+    location=settings.GOOGLE_CLOUD_REGION,
+    credentials=_creds,
+)
 _EMBEDDING_MODEL = "text-embedding-004"
 _log = logging.getLogger(__name__)
 
@@ -36,10 +40,11 @@ _log = logging.getLogger(__name__)
 
 async def get_user_embedding(text_input: str) -> list[float]:
     """Vertex AI text-embedding-004로 임베딩 생성 (dim=768)"""
-    model = TextEmbeddingModel.from_pretrained(_EMBEDDING_MODEL)
-    inputs = [TextEmbeddingInput(text_input, task_type="RETRIEVAL_QUERY")]
-    embeddings = await asyncio.to_thread(model.get_embeddings, inputs)
-    return embeddings[0].values
+    response = await _genai_client.aio.models.embed_content(
+        model=_EMBEDDING_MODEL,
+        contents=[text_input],
+    )
+    return response.embeddings[0].values
 
 
 # ---------------------------------------------------------------------------

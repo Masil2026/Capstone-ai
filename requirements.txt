@@ -8,7 +8,7 @@ pydantic-settings==2.5.2
 
 # --- AI & LLM ---
 pydantic-ai-slim[google]==1.93.0
-google-cloud-aiplatform
+google-genai
 
 # --- Database & Cache ---
 sqlalchemy==2.0.32
