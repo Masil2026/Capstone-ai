@@ -10,7 +10,7 @@ from pydantic_ai import Agent
 _log = logging.getLogger(__name__)
 
 from app.core.config import settings
-from app.schemas.ai_message import OrchestratorResult
+from app.schemas.ai_message import ChangeFields, OrchestratorResult
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
@@ -47,6 +47,26 @@ orchestrator_agent = Agent(
         "시스템 내부 처리 과정(데이터 반환 방식, JSON 구조 등)을 설명하는 문장도 절대 쓰지 않는다."
     ),
 )
+
+# ---------------------------------------------------------------------------
+# change payload 전용 추출기
+# ---------------------------------------------------------------------------
+# 오케스트레이터(Gemini)가 message로는 변경 완료를 안내하면서 change 필드를 null로
+# 반환하는 경우가 잦다 (optional 필드 회피). output_type이 ChangeFields 필수라서
+# 이 추출기는 null로 도망갈 수 없다 — 컨트롤러의 복구 가드에서 사용.
+
+change_extractor_agent = Agent(
+    model=_build_model("preprocessor"),
+    output_type=ChangeFields,
+    system_prompt=(
+        "당신은 여행 기본 정보 변경 추출기입니다.\n"
+        "사용자 요청과 AI 안내문을 보고 변경된 필드만 채운 ChangeFields JSON을 반환하라.\n"
+        "- 변경되지 않은 필드는 null로 둔다.\n"
+        "- 날짜는 YYYY-MM-DD 형식.\n"
+        "- AI 안내문에 계산된 최종 날짜·값이 있으면 그 값을 그대로 사용한다."
+    ),
+)
+
 
 # ---------------------------------------------------------------------------
 # 동적 시스템 프롬프트
@@ -87,6 +107,8 @@ _TYPE_INSTRUCTIONS: dict[str, str] = {
 반환 JSON의 필드를 아래와 같이 채워야 한다:
 - `change`: 변경된 필드만 포함 (변경하지 않은 필드는 null)
   가능한 필드: destinations, start_date, end_date, budget, adult_count, child_count, child_ages, origin
+  ⚠️ message에서 변경을 완료했다고 안내하려면 change 필드를 반드시 채워야 한다.
+  change를 채우지 못하는 상황이면 "변경했습니다" 같은 완료 표현을 쓰지 말고 질문만 한다.
 - `message`: 무엇이 어떻게 변경되었는지 구체적으로 안내한다.
   예) "여행 기간을 5월 3일~7일로 변경하고, 예산을 50만원으로 조정했습니다."
   정보 부족 시: 누락된 정보를 구체적으로 명시하며 질문한다.
