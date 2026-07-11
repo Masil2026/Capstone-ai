@@ -509,6 +509,7 @@ def _build_done_event(
     if orch_result.change:
         c = orch_result.change
         destinations_data = [d.model_dump() for d in c.destinations] if c.destinations else None
+        origin_data = c.origin.model_dump() if c.origin else None
         change = ChangePayload(
             destinations=destinations_data,
             startDate=c.start_date,
@@ -517,6 +518,7 @@ def _build_done_event(
             adultCount=c.adult_count,
             childCount=c.child_count,
             childAges=c.child_ages,
+            origin=origin_data,
         )
 
     cancel = None

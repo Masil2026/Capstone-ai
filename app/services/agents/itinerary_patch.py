@@ -645,7 +645,10 @@ async def _patch_flight(deps: Any, user_message: str) -> OrchestratorResult | No
     day_plans = _copy_day_plans(deps.current_itinerary)
     end_date = _get_itinerary_end_date(deps.current_itinerary)
     start_date = _get_itinerary_start_date(deps.current_itinerary)
-    target = _find_flight_item(day_plans, user_message, end_date=end_date, start_date=start_date)
+    origin = deps.current_itinerary.get("origin")
+    target = _find_flight_item(
+        day_plans, user_message, end_date=end_date, start_date=start_date, origin=origin,
+    )
     if target is None:
         return None
     date_key, index, item = target
@@ -780,8 +783,9 @@ def _find_flight_item(
     *,
     end_date: str | None = None,
     start_date: str | None = None,
+    origin: str | None = None,
 ) -> tuple[str, int, dict] | None:
-    direction_hint = _flight_direction_hint(user_message)
+    direction_hint = _flight_direction_hint(user_message, origin)
     return_threshold = str(date.fromisoformat(end_date) - timedelta(days=1)) if end_date else None
     depart_threshold = str(date.fromisoformat(start_date) + timedelta(days=1)) if start_date else None
     best: tuple[int, str, int, dict] | None = None
@@ -820,10 +824,15 @@ def _find_flight_item(
     return date_key, index, item
 
 
-def _flight_direction_hint(user_message: str) -> str | None:
-    if any(word in user_message for word in ("귀국", "돌아오는", "오는", "인천으로")):
+def _flight_direction_hint(user_message: str, origin: str | None = None) -> str | None:
+    return_words = ("귀국", "돌아오는", "오는", "인천으로")
+    depart_words = ("출발", "가는", "떠나는", "서울에서", "인천에서")
+    if origin:
+        return_words += (f"{origin}으로", f"{origin}로")
+        depart_words += (f"{origin}에서",)
+    if any(word in user_message for word in return_words):
         return "return"
-    if any(word in user_message for word in ("출발", "가는", "떠나는", "서울에서", "인천에서")):
+    if any(word in user_message for word in depart_words):
         return "depart"
     return None
 

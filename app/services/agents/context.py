@@ -165,7 +165,7 @@ async def _query_current_itinerary(room_id: str) -> dict | None:
         result = await db.execute(
             text(
                 "SELECT destinations, start_date, end_date, total_days, "
-                "budget, adult_count, child_count, child_ages, day_plans "
+                "budget, adult_count, child_count, child_ages, day_plans, origin "
                 "FROM itineraries "
                 "WHERE room_id = :room_id "
                 "ORDER BY created_at DESC LIMIT 1"
@@ -193,6 +193,11 @@ async def _query_current_itinerary(room_id: str) -> dict | None:
         if isinstance(child_ages, str):
             child_ages = json.loads(child_ages)
 
+        origin = row.origin
+        if isinstance(origin, str):
+            origin = json.loads(origin)
+        origin_city = origin.get("city") if origin else None
+
         return {
             "destinations": destinations,
             "start_date": _to_date_str(row.start_date),
@@ -203,6 +208,7 @@ async def _query_current_itinerary(room_id: str) -> dict | None:
             "child_count": row.child_count,
             "child_ages": child_ages or [],
             "day_plans": day_plans,
+            "origin": origin_city,
         }
 
 

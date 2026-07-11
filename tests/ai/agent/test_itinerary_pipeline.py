@@ -36,6 +36,7 @@ from app.services.agents.itinerary_pipeline import (
     _no_hotels,
     _build_planner_prompt,
     _build_synthesizer_prompt,
+    _origin_ctx,
     PlannerDeps,
     SynthesizerDeps,
     PlannerOutput,
@@ -565,7 +566,7 @@ class TestNoHotels:
 
 # ── 당일치기 프롬프트 분기 (_build_planner_prompt / _build_synthesizer_prompt) ──
 
-def _make_planner_deps(is_day_trip: bool) -> PlannerDeps:
+def _make_planner_deps(is_day_trip: bool, origin: str | None = None) -> PlannerDeps:
     destinations = [_dest("서울", "2026-06-01", "2026-06-01")]
     itinerary_info = {
         "destinations": destinations,
@@ -591,10 +592,11 @@ def _make_planner_deps(is_day_trip: bool) -> PlannerDeps:
         similar_messages=[],
         replan_dates=[],
         is_day_trip=is_day_trip,
+        origin=origin,
     )
 
 
-def _make_synth_deps(is_day_trip: bool) -> SynthesizerDeps:
+def _make_synth_deps(is_day_trip: bool, origin: str | None = None) -> SynthesizerDeps:
     destinations = [_dest("서울", "2026-06-01", "2026-06-01")]
     itinerary_info = {
         "destinations": destinations,
@@ -621,6 +623,7 @@ def _make_synth_deps(is_day_trip: bool) -> SynthesizerDeps:
         attraction_prices={},
         replan_dates=[],
         is_day_trip=is_day_trip,
+        origin=origin,
     )
 
 
@@ -655,6 +658,141 @@ class TestSynthesizerPromptDayTrip:
         assert "## 선택된 숙소" in prompt
         assert "- 숙소 체크인 항목" in prompt
         assert "## 당일치기 시작/종료 시간 범위" not in prompt
+
+
+# ── _origin_ctx: 출발지 문구 조립 ─────────────────────────────────────────────
+
+class TestOriginCtx:
+    def test_missing_origin_falls_back_to_korea_wording(self):
+        """출발지 미입력 시 기존 대한민국/ICN·GMP 문구 그대로 유지 (하위 호환)"""
+        ctx = _origin_ctx(None)
+        assert ctx["word"] == "한국"
+        assert ctx["full"] == "대한민국"
+        assert "인천국제공항(ICN)" in ctx["airport_note"]
+        assert "김포공항(GMP)" in ctx["airport_note"]
+        assert ctx["return_note"] == "한국(ICN/GMP)"
+
+    def test_given_origin_uses_generalized_wording(self):
+        """출발지가 있으면 도시명 기반 일반화 문구를 사용하고, ICN/GMP를 못박지 않는다"""
+        ctx = _origin_ctx("부산")
+        assert ctx["word"] == "부산"
+        assert ctx["full"] == "부산"
+        assert ctx["return_note"] == "부산"
+        assert "ICN" not in ctx["airport_note"]
+        assert "GMP" not in ctx["airport_note"]
+
+
+# ── 플래너/합성기 프롬프트 — 출발지 반영 ───────────────────────────────────────
+
+class TestPlannerPromptOrigin:
+    def test_missing_origin_keeps_existing_korea_wording(self):
+        prompt = _build_planner_prompt(_make_planner_deps(is_day_trip=False, origin=None))
+        assert "출발지: 대한민국 — 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다." in prompt
+        assert "여행 경로: 한국 → 서울 → 한국" in prompt
+        assert "⚠️ 귀국편(return) 필수 제약: 한국(ICN/GMP) 도착 일자가" in prompt
+
+    def test_given_origin_replaces_korea_wording(self):
+        prompt = _build_planner_prompt(_make_planner_deps(is_day_trip=False, origin="부산"))
+        assert "출발지: 부산 —" in prompt
+        assert "여행 경로: 부산 → 서울 → 부산" in prompt
+        assert "⚠️ 귀국편(return) 필수 제약: 부산 도착 일자가" in prompt
+        assert "인천국제공항(ICN) 또는 김포공항(GMP)" not in prompt
+
+
+class TestSynthesizerPromptOrigin:
+    def test_missing_origin_keeps_existing_korea_wording(self):
+        prompt = _build_synthesizer_prompt(_make_synth_deps(is_day_trip=False, origin=None))
+        assert "이 여행의 출발지는 대한민국이다. 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다." in prompt
+        assert "여행 경로: 한국 → 서울 → 한국" in prompt
+        assert "1일차 첫 항목: 한국 출발 항공 이동" in prompt
+        assert "마지막날 마지막 항목: 한국 귀국 항공 이동" in prompt
+        assert "한국 내 활동(출발 준비, 공항 이동, 귀국 후): 출발지 현지 시각" in prompt
+
+    def test_given_origin_replaces_korea_wording(self):
+        prompt = _build_synthesizer_prompt(_make_synth_deps(is_day_trip=False, origin="부산"))
+        assert "이 여행의 출발지는 부산이다." in prompt
+        assert "여행 경로: 부산 → 서울 → 부산" in prompt
+        assert "1일차 첫 항목: 부산 출발 항공 이동" in prompt
+        assert "마지막날 마지막 항목: 부산 귀국 항공 이동" in prompt
+        assert "부산 내 활동(출발 준비, 공항 이동, 귀국 후): 출발지 현지 시각" in prompt
+        assert "KST(UTC+9)" not in prompt
+
+
+# ── 당일치기 + 출발지 결합 ────────────────────────────────────────────────────
+
+class TestDayTripWithOrigin:
+    """당일치기(is_day_trip=True)와 출발지 지정이 함께 와도 문구가 충돌 없이 결합되는지 확인."""
+
+    def test_planner_prompt_combines_day_trip_and_origin(self):
+        prompt = _build_planner_prompt(_make_planner_deps(is_day_trip=True, origin="부산"))
+        # 당일치기 전용 섹션 유지
+        assert "## 당일치기 시간 범위 제약" in prompt
+        assert "하루 총 4~6개 항목" in prompt
+        assert "2. selected_hotels: 당일치기(숙박 없음)이므로 빈 배열로 반환" in prompt
+        # 출발지 반영 문구도 함께 적용
+        assert "출발지: 부산 —" in prompt
+        assert "여행 경로: 부산 → 서울 → 부산" in prompt
+        assert "인천국제공항(ICN) 또는 김포공항(GMP)" not in prompt
+
+    def test_synthesizer_prompt_combines_day_trip_and_origin(self):
+        prompt = _build_synthesizer_prompt(_make_synth_deps(is_day_trip=True, origin="부산"))
+        # 당일치기 전용 섹션 유지 (숙소 귀환 규칙 없음)
+        assert "## 당일치기 시작/종료 시간 범위" in prompt
+        assert "## 숙소 귀환·휴식 배치 규칙" not in prompt
+        assert "## 선택된 숙소" not in prompt
+        # 출발지 반영 문구도 함께 적용
+        assert "이 여행의 출발지는 부산이다." in prompt
+        assert "1일차 첫 항목: 부산 출발 항공 이동" in prompt
+        assert "마지막날 마지막 항목: 부산 귀국 항공 이동" in prompt
+
+
+# ── _fetch_flight_legs: 출발지 파라미터화 ─────────────────────────────────────
+
+class TestFetchFlightLegsOrigin:
+    def _loc_ok(self, params):
+        code = (params.get("query", "XXX")[:3] or "XXX").upper()
+        return {"status": "success", "data": {"selected": {"id": f"{code}.AIRPORT"}}}
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_seoul_when_origin_omitted(self):
+        """origin_en 생략 시 기존 동작(Seoul 기준)과 동일 — 하위 호환"""
+        def _mock_task(tool, action, params):
+            if action == "search_flight_location":
+                return self._loc_ok(params)
+            return {"status": "success", "data": {"flights": [], "booking_list_url": "http://list"}}
+
+        destinations = [_dest("도쿄", "2026-06-01", "2026-06-03")]
+        with patch.object(_service, "process_task", side_effect=AsyncMock(side_effect=_mock_task)):
+            legs = await _fetch_flight_legs(
+                destinations=destinations, cities_en=["Tokyo"],
+                adults=1, children=0, child_ages=[],
+            )
+
+        depart = next(l for l in legs if l["direction"] == "depart")
+        return_leg = next(l for l in legs if l["direction"] == "return")
+        assert depart["from"] == "Seoul"
+        assert return_leg["to"] == "Seoul"
+
+    @pytest.mark.asyncio
+    async def test_uses_given_origin_for_depart_and_return(self):
+        """origin_en을 지정하면 출발/귀국 구간이 해당 출발지 기준으로 검색된다"""
+        def _mock_task(tool, action, params):
+            if action == "search_flight_location":
+                return self._loc_ok(params)
+            return {"status": "success", "data": {"flights": [], "booking_list_url": "http://list"}}
+
+        destinations = [_dest("도쿄", "2026-06-01", "2026-06-03")]
+        with patch.object(_service, "process_task", side_effect=AsyncMock(side_effect=_mock_task)):
+            legs = await _fetch_flight_legs(
+                destinations=destinations, cities_en=["Tokyo"],
+                adults=1, children=0, child_ages=[],
+                origin_en="Busan",
+            )
+
+        depart = next(l for l in legs if l["direction"] == "depart")
+        return_leg = next(l for l in legs if l["direction"] == "return")
+        assert depart["from"] == "Busan"
+        assert return_leg["to"] == "Busan"
 
 
 # ── Booking 숙소 정규화 ───────────────────────────────────────────────────────

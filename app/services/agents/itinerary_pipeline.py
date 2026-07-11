@@ -43,7 +43,28 @@ _service = TravelAgentService({
     "google_maps":          GoogleMapsAdapter(),
 })
 
-_DEFAULT_ORIGIN = "Seoul"
+_DEFAULT_ORIGIN = "Seoul"  # 출발지 미입력 시 폴백 — 기존 동작(서울/대한민국 기준) 유지
+
+
+def _origin_ctx(origin_raw: str | None) -> dict[str, str]:
+    """출발지 관련 프롬프트 문구 조립.
+
+    미입력(origin_raw=None)이면 기존 '대한민국 — 인천국제공항(ICN)/김포공항(GMP)' 문구를 그대로 유지한다
+    (하위 호환). 출발지가 있으면 해당 도시명 기준으로 일반화된 문구를 사용한다.
+    """
+    if not origin_raw:
+        return {
+            "word": "한국",
+            "full": "대한민국",
+            "airport_note": "항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다.",
+            "return_note": "한국(ICN/GMP)",
+        }
+    return {
+        "word": origin_raw,
+        "full": origin_raw,
+        "airport_note": "실제 출발 공항은 아래 항공편 검색 결과의 공항 코드를 따른다.",
+        "return_note": origin_raw,
+    }
 
 
 def _all_dates(destinations: list[dict]) -> list[str]:
@@ -296,6 +317,7 @@ class PlannerDeps:
     similar_messages: list[dict]
     replan_dates: list[str]      # 날짜 변경으로 재계획이 필요한 날짜 목록 (없으면 [])
     is_day_trip: bool = False    # 시작일==종료일(0박) 당일치기 여부
+    origin: str | None = None    # 출발지 (한국어 원본, 미입력 시 None)
 
 
 planner_agent = Agent(
@@ -334,11 +356,12 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         flush=True,
     )
 
+    origin_ctx = _origin_ctx(d.origin)
     lines = [
         "당신은 여행 일정 플래너입니다.",
-        f"여행 경로: 한국 → {dest_str} → 한국 | 기간: {start} ~ {end} ({total_days}일) | 오늘: {d.today}",
+        f"여행 경로: {origin_ctx['word']} → {dest_str} → {origin_ctx['word']} | 기간: {start} ~ {end} ({total_days}일) | 오늘: {d.today}",
         f"인원: 성인 {adults}명, 어린이 {child_str} | 총 예산: {budget_str}",
-        "출발지: 대한민국 — 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다.",
+        f"출발지: {origin_ctx['full']} — {origin_ctx['airport_note']}",
         "",
         "## 역할",
         "아래 데이터를 바탕으로 3가지를 결정하고 PlannerOutput을 반환하라:",
@@ -374,7 +397,7 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "- 출발 시간 제한 없음. 새벽(00:00~06:00) / 야간(21:00~23:59) 출발도 정상 선택 가능.",
         "- 장거리 국제선(유럽·미주·오세아니아)은 새벽·야간 출발이 일반적이므로 시간대 무관하게 최적 편 선택.",
         "- 가격·경유 횟수·도착 시간을 종합해 최선의 편 선택. 비용이 낮고 경유 적은 편 우선.",
-        f"- ⚠️ 귀국편(return) 필수 제약: 한국(ICN/GMP) 도착 일자가 반드시 여행 마지막 날({end})이어야 한다.",
+        f"- ⚠️ 귀국편(return) 필수 제약: {origin_ctx['return_note']} 도착 일자가 반드시 여행 마지막 날({end})이어야 한다.",
         f"  arriving_at 날짜가 {end}을 초과하는 귀국편은 절대 선택 금지.",
         f"  귀국편 데이터에는 {end} 출발편과 {end} 하루 전 출발편이 모두 포함되어 있다. {end} 당일 도착 가능한 편을 우선 선택.",
         "- ⚠️ '실시간 항공편 없음' 표시된 구간은 selected_flights에 절대 포함하지 말 것. 항공편을 임의로 만들거나 추측하지 말 것.",
@@ -528,6 +551,7 @@ class SynthesizerDeps:
     attraction_prices: dict[str, str]   # place_name → Tavily 입장료 검색 결과 (없으면 {})
     replan_dates: list[str]             # 날짜 변경으로 재계획이 필요한 날짜 목록 (없으면 [])
     is_day_trip: bool = False           # 시작일==종료일(0박) 당일치기 여부
+    origin: str | None = None           # 출발지 (한국어 원본, 미입력 시 None)
 
 
 synthesizer_agent = Agent(
@@ -565,15 +589,16 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         flush=True,
     )
 
+    origin_ctx = _origin_ctx(d.origin)
     lines = [
         "당신은 여행 일정 완성 전문가입니다.",
         "플래너가 확정한 항공·숙소·방문 순서와 장소 검색·동선 데이터를 바탕으로",
         "완전한 OrchestratorResult를 작성하라.",
         "",
         "## 여행 기본 전제 (항상 준수)",
-        "- 이 여행의 출발지는 대한민국이다. 항공 출발 공항은 인천국제공항(ICN) 또는 김포공항(GMP)이다.",
-        f"- 여행 경로: 한국 → {dest_str} → 한국",
-        "- 1일차 첫 항목: 한국 출발 항공 이동 (leg_index=0 depart 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
+        f"- 이 여행의 출발지는 {origin_ctx['full']}이다. {origin_ctx['airport_note']}",
+        f"- 여행 경로: {origin_ctx['word']} → {dest_str} → {origin_ctx['word']}",
+        f"- 1일차 첫 항목: {origin_ctx['word']} 출발 항공 이동 (leg_index=0 depart 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  당일 도착 예) {\"plan_name\": \"인천국제공항(ICN) → 도쿄 나리타(NRT) 항공 이동 (XX항공)\", \"time\": \"09:00 ~ 11:30\", \"cost\": {\"amount\": 850000, \"currency\": \"KRW\"}, \"note\": \"출발 09:00 ICN (KST+9) | 도착 11:30 NRT (JST+9) | 총 비행시간 약 2h 30m | 시차 0h\"}",
         "⚠️ 다음날 도착 항공(+1일) 처리 규칙 — 반드시 준수:",
         "   출발일 day_plans 키: 공항 이동 항목 + 항공 이동 항목(time='출발시각 ~ 23:59')만 포함. 체크인·식사·관광 절대 금지.",
@@ -584,10 +609,10 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "       '2026-12-21': [{\"plan_name\":\"XX항공 기내 (비행 중) → STN 도착\",\"time\":\"00:00~16:45\",\"cost\":null}, ...]",
         "- 도시 이동일 첫 항목: 도시 간 이동 항공 (해당 구간 connect 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  예) {\"plan_name\": \"파리 샤를드골(CDG) → 로마 피우미치노(FCO) 항공 이동 (항공사명)\", \"time\": \"HH:MM ~ HH:MM\", \"cost\": {\"amount\": price_original, \"currency\": currency}}",
-        f"- 마지막날 마지막 항목: 한국 귀국 항공 이동 (return 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
+        f"- 마지막날 마지막 항목: {origin_ctx['word']} 귀국 항공 이동 (return 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  예) {\"plan_name\": \"로마 피우미치노(FCO) → 인천국제공항(ICN) 귀국 항공 (항공사명)\", \"time\": \"HH:MM ~ HH:MM\", \"cost\": {\"amount\": price_original, \"currency\": currency}}",
         f"  ⚠️ 귀국편 도착 날짜는 반드시 여행 마지막 날({destinations[-1]['end_date'][:10]})이어야 한다.",
-        f"  한국 도착이 {destinations[-1]['end_date'][:10]} 이후로 넘어가는 일정은 절대 금지.",
+        f"  {origin_ctx['word']} 도착이 {destinations[-1]['end_date'][:10]} 이후로 넘어가는 일정은 절대 금지.",
         f"  day_plans에 {destinations[-1]['end_date'][:10]} 이후 날짜 키가 생기면 안 된다.",
         "- 각 항공 이동 항목 직전: 공항 이동 항목 삽입 (출발 2~3시간 전 기준, 새벽 출발이면 심야 이동도 그대로 기재)",
         "  ⚠️ 공항 이동 항목의 plan_name에는 반드시 공항명과 IATA 코드를 함께 표기한다.",
@@ -640,7 +665,7 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         '⚠️ time은 반드시 "HH:MM ~ HH:MM" 형식의 24시간제 숫자만 사용한다.',
         "⚠️ '익일 아침', '다음날', '오전 중', '(+1일)', '(+2일)' 같은 텍스트 표현은 time 필드에 절대 사용 금지.",
         "⚠️ 시각 기준 원칙: 모든 time 필드는 해당 활동이 이루어지는 장소의 현지 시각 기준.",
-        "   한국 내 활동(출발 준비, 공항 이동, 귀국 후): KST(UTC+9)",
+        f"   {origin_ctx['word']} 내 활동(출발 준비, 공항 이동, 귀국 후): 출발지 현지 시각",
         "   해외 목적지 활동(관광, 식사, 이동, 체크인 등): 해당 도시 현지 시각",
         "   예) 런던 관광 10:00~12:00(GMT): time='10:00 ~ 12:00'  /  취리히 식사 19:30(CET): time='19:30 ~ 21:00'",
         "⚠️ 항공 이동 항목 시각 규칙: 출발 = 출발지 현지 시각, 도착 = 도착지 현지 시각.",
@@ -1038,13 +1063,14 @@ async def _fetch_flight_legs(
     adults: int,
     children: int,
     child_ages: list,
+    origin_en: str = _DEFAULT_ORIGIN,
 ) -> list[dict]:
     """모든 항공 구간을 Booking으로 병렬 검색한다.
 
     구간 구성 (N개 도시):
-      leg 0       : 한국(Seoul) → cities_en[0]          depart
-      leg 1..N-1  : cities_en[i-1] → cities_en[i]       connect
-      leg N       : cities_en[-1] → 한국(Seoul)          return
+      leg 0       : origin_en → cities_en[0]          depart
+      leg 1..N-1  : cities_en[i-1] → cities_en[i]     connect
+      leg N       : cities_en[-1] → origin_en          return
 
     Booking 항공은 2단계: search_flight_location(도시→공항ID) → search_flights.
     """
@@ -1056,7 +1082,7 @@ async def _fetch_flight_legs(
 
     # 1) 등장하는 모든 도시의 공항 정보를 한 번씩만 병렬 해석 (중복 호출 방지)
     #    selected(기본 공항) + is_korea(국가) + gmp_id(김포 후보, 사실상 서울만 보유)
-    unique_cities = list(dict.fromkeys([_DEFAULT_ORIGIN, *cities_en]))
+    unique_cities = list(dict.fromkeys([origin_en, *cities_en]))
     loc_results = await asyncio.gather(
         *[_service.process_task("booking", "search_flight_location", {"query": c}) for c in unique_cities],
         return_exceptions=True,
@@ -1099,8 +1125,8 @@ async def _fetch_flight_legs(
     tasks = []
 
     # Depart
-    tasks.append(_search(_DEFAULT_ORIGIN, cities_en[0], destinations[0]["start_date"][:10]))
-    leg_info.append({"leg_index": 0, "direction": "depart", "from": _DEFAULT_ORIGIN, "to": cities_en[0]})
+    tasks.append(_search(origin_en, cities_en[0], destinations[0]["start_date"][:10]))
+    leg_info.append({"leg_index": 0, "direction": "depart", "from": origin_en, "to": cities_en[0]})
 
     # Connect legs
     for i in range(1, len(destinations)):
@@ -1113,15 +1139,15 @@ async def _fetch_flight_legs(
     #    (마지막 날을 통째로 날리는 전날 귀국편이 후보에 섞이는 것을 방지).
     end_dt = datetime.strptime(destinations[-1]["end_date"][:10], "%Y-%m-%d").date()
     return_from_korea = (airport_info.get(cities_en[-1]) or {}).get("is_korea", False)
-    return_to_korea = (airport_info.get(_DEFAULT_ORIGIN) or {}).get("is_korea", False)
+    return_to_korea = (airport_info.get(origin_en) or {}).get("is_korea", False)
     is_domestic_return = return_from_korea and return_to_korea
     return_dates = [str(end_dt)] if is_domestic_return else [str(end_dt), str(end_dt - timedelta(days=1))]
     n_return = len(return_dates)
     for d in return_dates:
-        tasks.append(_search(cities_en[-1], _DEFAULT_ORIGIN, d))
+        tasks.append(_search(cities_en[-1], origin_en, d))
     return_leg_info = {
         "leg_index": len(destinations), "direction": "return",
-        "from": cities_en[-1], "to": _DEFAULT_ORIGIN,
+        "from": cities_en[-1], "to": origin_en,
     }
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1702,6 +1728,7 @@ async def run_itinerary_pipeline(
     child_ages = itinerary.get("child_ages") or []
     budget = itinerary.get("budget")
     is_day_trip = _is_day_trip(itinerary)
+    origin_raw = itinerary.get("origin")  # None이면 미입력 → 기존 서울/한국 기준 동작
 
     # 날짜 변경 감지: 기존 day_plans가 있으면 교통 이동일 제거 + 재계획 날짜 산출
     replan_dates: list[str] = []
@@ -1710,12 +1737,14 @@ async def run_itinerary_pipeline(
         if replan_dates:
             itinerary = {**itinerary, "day_plans": adjusted_day_plans}
 
-    # 도시명 영문 변환 (전체 목적지 일괄 처리 — 단일 LLM 호출)
+    # 도시명 영문 변환 (출발지 + 전체 목적지 일괄 처리 — 단일 LLM 호출)
     cities_kr = [d["city"] for d in destinations]
-    cities_en = await _extract_english_cities(cities_kr)
+    translated = await _extract_english_cities([origin_raw or _DEFAULT_ORIGIN, *cities_kr])
+    origin_en, cities_en = translated[0], translated[1:]
 
     print(
         f"\n[run_itinerary_pipeline] 파이프라인 시작"
+        f"\n  origin       : {origin_raw} (en={origin_en})"
         f"\n  destinations : {cities_kr}"
         f"\n  cities_en    : {cities_en}"
         f"\n  start={destinations[0]['start_date']}, end={destinations[-1]['end_date']}"
@@ -1731,7 +1760,7 @@ async def run_itinerary_pipeline(
     web_summaries, weather_by_city, flight_legs, hotels_by_city = await asyncio.gather(
         _fetch_web_summaries(destinations, deps.preferences),
         _fetch_weather_all(destinations, deps.today),
-        _fetch_flight_legs(destinations, cities_en, adults, children, child_ages),
+        _fetch_flight_legs(destinations, cities_en, adults, children, child_ages, origin_en),
         hotels_coro,
     )
 
@@ -1758,6 +1787,7 @@ async def run_itinerary_pipeline(
         similar_messages=deps.similar_messages,
         replan_dates=replan_dates,
         is_day_trip=is_day_trip,
+        origin=origin_raw,
     )
     planner_context = _build_planner_prompt(planner_deps)
     planner_result = await run_with_retry(
@@ -1835,6 +1865,7 @@ async def run_itinerary_pipeline(
         attraction_prices=attraction_prices,
         replan_dates=replan_dates,
         is_day_trip=is_day_trip,
+        origin=origin_raw,
     )
     synth_context = _build_synthesizer_prompt(synth_deps)
     for attempt in range(4):

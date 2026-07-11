@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.agents import itinerary_patch
-from app.services.agents.itinerary_patch import try_patch_itinerary_item
+from app.services.agents.itinerary_patch import try_patch_itinerary_item, _flight_direction_hint
 
 
 def _deps(current_itinerary):
@@ -1227,3 +1227,26 @@ async def test_meal_patch_rejects_place_candidate_outside_trip_city():
     assert item.place == "제주특별자치도 제주시 서해안로 364"
     assert "인천시청점" not in item.plan_name
     assert "고등어회" not in item.note
+
+
+# ── _flight_direction_hint: 출발지 기반 방향 힌트 ─────────────────────────────
+
+class TestFlightDirectionHint:
+    def test_generic_words_work_without_origin(self):
+        assert _flight_direction_hint("출발 항공편 바꿔줘") == "depart"
+        assert _flight_direction_hint("귀국편 바꿔줘") == "return"
+        assert _flight_direction_hint("항공편 바꿔줘") is None
+
+    def test_seoul_incheon_wording_keeps_working_without_origin(self):
+        """출발지 미입력(하위 호환) — 기존 서울/인천 문구 그대로 인식"""
+        assert _flight_direction_hint("서울에서 편 바꿔줘") == "depart"
+        assert _flight_direction_hint("인천으로 오는 거 말고 다른 걸로") == "return"
+
+    def test_non_seoul_origin_short_phrasing_recognized(self):
+        """짧은 화법(도시명+조사)도 출발지가 서울/인천이 아니면 인식 못 하던 문제 수정"""
+        assert _flight_direction_hint("부산에서 편 바꿔줘", origin="부산") == "depart"
+        assert _flight_direction_hint("부산으로 오는 편 바꿔줘", origin="부산") == "return"
+
+    def test_non_seoul_origin_short_phrasing_unrecognized_without_origin_param(self):
+        """origin을 넘기지 않으면 부산 같은 도시명은 여전히 인식되지 않는다(회귀 방지용 대조군)"""
+        assert _flight_direction_hint("부산에서 편 바꿔줘") is None
