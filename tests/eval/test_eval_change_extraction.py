@@ -14,6 +14,7 @@ pytestmark = pytest.mark.llm
 from app.services.agents._base import run_with_retry
 from app.services.agents.orchestrator import change_extractor_agent
 from tests.eval.golden import CHANGE_EXTRACTION_CASES, SAMPLE_ITINERARY
+from tests.eval import report
 
 ACCURACY_THRESHOLD = 0.8
 
@@ -49,10 +50,12 @@ async def test_change_extraction_accuracy():
     )
 
     passed = 0
+    fails: list[str] = []
     print("\n" + "=" * 88)
     for (um, _, expected), r in zip(CHANGE_EXTRACTION_CASES, results):
         if isinstance(r, Exception):
             print(f"ERR  {um}  ({r})")
+            fails.append(f"ERR  {um} ({r})")
             continue
         actual = r.output.model_dump(exclude_none=True)
         misses = [k for k, v in expected.items() if not _field_matches(actual, k, v)]
@@ -63,10 +66,15 @@ async def test_change_extraction_accuracy():
         print(f"     실제: {json.dumps(actual, ensure_ascii=False)}")
         if misses:
             print(f"     불일치 필드: {misses}")
+            fails.append(f"FAIL {um} (불일치 필드: {misses})")
 
     accuracy = passed / len(CHANGE_EXTRACTION_CASES)
     print("-" * 88)
     print(f"change 추출 정확도: {passed}/{len(CHANGE_EXTRACTION_CASES)} = {accuracy:.1%} (기준 {ACCURACY_THRESHOLD:.0%})")
     print("=" * 88)
 
+    report.add("L2 change 추출 정확도", [
+        f"정확도: {passed}/{len(CHANGE_EXTRACTION_CASES)} = {accuracy:.1%} (기준 {ACCURACY_THRESHOLD:.0%})",
+        *fails,
+    ])
     assert accuracy >= ACCURACY_THRESHOLD, f"추출 정확도 {accuracy:.1%} < 기준 {ACCURACY_THRESHOLD:.0%}"

@@ -86,7 +86,9 @@ def _is_day_trip(itinerary: dict) -> bool:
     return bool(start) and start[:10] == end[:10]
 
 
-_TRANSPORT_KEYWORDS = frozenset({"항공 이동", "기내 (비행 중)"})
+# "귀국 항공" 포함 필수 — 합성기가 귀국편을 "… 귀국 항공 (항공사)"로 생성하므로
+# 누락 시 날짜 연장 때 옛 귀국일이 재계획에서 빠져 스텁 일정만 남는다
+_TRANSPORT_KEYWORDS = frozenset({"항공 이동", "기내 (비행 중)", "귀국 항공"})
 
 # 숙소 예약 URL을 붙일 실제 '숙박 성격' 항목을 가리는 키워드.
 # 이동 경로·식사 항목이 place에 호텔명을 우연히 포함해도 예약 링크가 붙지 않도록 한다.
@@ -281,6 +283,8 @@ safety_agent = Agent(
         "- 일반 관광객 입국이 사실상 불가능한 국가 (제재·미수교 등, 예: 북한)\n"
         "- 대규모 재난·전염병으로 여행 자체가 제한되는 상황\n"
         "단순 치안 주의(소매치기·시위 등)는 unsafe=false.\n"
+        "검색 결과에는 과거 시점의 기사(예: 코로나19 팬데믹 시기 경보)가 섞여 있을 수 있다. "
+        "오늘 날짜 기준으로 현재 유효한 경보만 근거로 삼고, 이미 해제됐거나 시점이 오래된 경보는 무시하라.\n"
         "user_consented=true 기준: 이전 대화 요약에 이 여행지의 위험 경고 기록이 있고, "
         "사용자 메시지가 그럼에도 진행하겠다는 의사(예: '그래도 짜줘', '응 진행해')인 경우."
     ),
@@ -289,6 +293,7 @@ safety_agent = Agent(
 
 async def _check_safety(
     destinations: list[dict], user_message: str, ai_summary: str | None,
+    today: str | None = None,
 ) -> SafetyVerdict | None:
     """도시별 안전 정보를 검색한 뒤 LLM 1회로 판정. 실패 시 None (fail-open)."""
     try:
@@ -316,6 +321,7 @@ async def _check_safety(
 
         prompt = "\n\n".join([
             *sections,
+            f"## 오늘 날짜\n{today or date.today().isoformat()}",
             f"## 이전 대화 요약\n{ai_summary or '없음'}",
             f"## 사용자 메시지\n{user_message}",
         ])
@@ -1787,7 +1793,7 @@ async def run_itinerary_pipeline(
         return
 
     # ── 안전 게이트: 위험 지역이면 경고 후 사용자 동의를 먼저 받는다 ────
-    verdict = await _check_safety(destinations, user_message, deps.ai_summary)
+    verdict = await _check_safety(destinations, user_message, deps.ai_summary, deps.today)
     if verdict and verdict.unsafe and not verdict.user_consented:
         warning = (
             f"⚠️ 요청하신 여행지 관련 안내드립니다.\n\n{verdict.risk_summary}\n\n"

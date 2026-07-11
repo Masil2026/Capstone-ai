@@ -25,6 +25,7 @@ from app.services.agents.itinerary_pipeline import run_itinerary_pipeline
 from app.services.agents.orchestrator import OrchestratorDeps
 from tests.eval.golden import PIPELINE_SCENARIOS
 from tests.eval.judge import GeminiFlashJudge
+from tests.eval import report
 
 _TIME_RE = re.compile(r"^\d{2}:\d{2} ~ \d{2}:\d{2}$")
 _INTERNAL_TERMS = ("day_plans", "change", "reservation", "JSON", "json")
@@ -91,7 +92,9 @@ _QUALITY_METRIC_KWARGS = dict(
     criteria=(
         "AI가 생성한 여행 일정이 요청 조건(목적지·기간·인원·예산)을 충실히 반영하는지, "
         "하루 구성(이동 동선, 식사 3회 내외, 관광·휴식 배분, 시간대의 현실성)이 "
-        "실제로 실행 가능한 수준인지 평가하라. 안내문이 자연스러운 한국어인지도 본다."
+        "실제로 실행 가능한 수준인지 평가하라. 안내문이 자연스러운 한국어인지도 본다. "
+        "예산 관련: 예상 비용이 예산을 초과하더라도 안내문에서 초과 사실을 알리고 "
+        "예산 업데이트를 제안했다면 감점하지 않는다 (의도된 제품 동작)."
     ),
     evaluation_params=[LLMTestCaseParams.INPUT, LLMTestCaseParams.ACTUAL_OUTPUT],
     threshold=0.5,
@@ -121,6 +124,9 @@ async def test_pipeline_scenario(scenario):
             result = item
 
     assert result is not None, "파이프라인이 OrchestratorResult를 반환하지 않음"
+    if not result.day_plans:
+        report.add(f"L3 파이프라인 — {scenario['name']}",
+                   [f"FAIL day_plans 비어 있음. message={result.message[:200]!r}"])
     assert result.day_plans, f"day_plans 비어 있음. message={result.message[:200]!r}"
 
     card = _structural_scorecard(result, scenario)
@@ -146,6 +152,13 @@ async def test_pipeline_scenario(scenario):
     for k, v in card.items():
         print(f"  {k:<12}: {v}")
     print(f"  GEval 품질   : {geval_line}")
+    print("-" * 80)
+    print("[생성된 일정 전문]")
+    print(_condense_for_judge(result))
     print("=" * 80)
 
+    report.add(f"L3 파이프라인 — {scenario['name']}", [
+        *[f"{k}: {v}" for k, v in card.items()],
+        f"GEval 품질: {geval_line}",
+    ])
     assert "FAIL" not in str(card["날짜 커버리지"]), card["날짜 커버리지"]
