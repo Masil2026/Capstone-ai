@@ -21,6 +21,7 @@ redis==5.0.8
 # --- Testing ---
 pytest==8.3.4
 pytest-asyncio==0.25.3
+deepeval==3.4.6  # AI 성능 평가 (골든셋 기반, tests/eval)
 
 # --- Auth & JWT (Clerk 토큰 검증용) ---
 python-jose[cryptography]==3.3.0
