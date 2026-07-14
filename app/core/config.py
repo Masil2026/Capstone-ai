@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     REDIS_PORT: int
     REDIS_PASSWORD: Optional[str] = None  # Upstash 전용 — Docker Redis는 미사용
     REDIS_URL: Optional[str] = None       # Upstash 전용 — Docker Redis는 미사용
+    REDIS_TTL_SECONDS: int = 28800        # Redis 키 만료 시간 — 8시간(28800초). (이슈 #13, 팀 협의 결정)
 
     # --- Server Settings ---
     PORT: int
