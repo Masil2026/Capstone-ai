@@ -429,7 +429,9 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "- 마지막 날(신규): 귀국편 탑승 2~3시간 전까지 일정 종료",
         "- 도시 이동일: ordered_queries 최소화 (공항 이동 관련 장소만 또는 빈 리스트)",
         "- 검색어 형식: '장소명 도시명 (영문)' — Google Maps 검색에 사용",
-        "  예) 'Senso-ji Temple Asakusa Tokyo', 'tonkotsu ramen Shinjuku Tokyo lunch'",
+        "  ⚠️ 국내(한국) 목적지는 반드시 한글 장소명을 맨 앞에 그대로 포함한다 (한국관광공사 이미지 매칭에 사용되므로 영문만 쓰면 이미지가 채워지지 않는다).",
+        "  예) 해외: 'Senso-ji Temple Asakusa Tokyo', 'tonkotsu ramen Shinjuku Tokyo lunch'",
+        "  예) 국내: '첨성대 경주 (Cheomseongdae Observatory)', '황리단길 경주 (Hwangnidan-gil)'",
     ]
 
     existing_plans = info.get("day_plans")
@@ -1692,7 +1694,9 @@ async def _attach_media(
         if np and np in place_map:
             return place_map[np], None
         for key, img in place_map.items():
-            if key and (key in np or np in key):
+            # place는 합성기가 상세 주소로 채우는 경우가 많아 장소명이 안 남는다 —
+            # plan_name까지 포함한 hay로 비교해야 실사용 데이터에서 매칭된다.
+            if key and (key in hay or key in np or np in key):
                 return img, None
         return None, None
 
