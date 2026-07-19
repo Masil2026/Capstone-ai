@@ -181,6 +181,7 @@ def _make_deps(request_type: str, current_itinerary: dict | None = None) -> Orch
         similar_messages=[],
         current_itinerary=current_itinerary,
         request_type=request_type,
+        reservations=[],
     )
 
 
@@ -256,19 +257,29 @@ async def test_full_itinerary_modify():
 
 @pytest.mark.asyncio
 async def test_full_change():
-    """날짜/예산 변경 — submit_change에 전달된 파라미터 확인"""
-    api_call_log = []
+    """날짜/예산 변경 — OrchestratorResult.change payload가 반드시 채워지는지 확인.
 
-    with patch.object(_orch._service, "process_task", side_effect=_make_logging_mock(api_call_log)):
-        deps = _make_deps("change")
-        result = await orchestrator_agent.run(
-            "여행 날짜 5월 20일부터 24일로 바꾸고, 예산은 150만원으로 늘려줘.",
-            deps=deps,
-        )
+    회귀 배경: LLM이 message로는 '변경했습니다'라고 답하면서 change=null을 반환해
+    백엔드 DB 기본정보 갱신이 조용히 누락되는 문제가 있었다.
+    """
+    from app.services.agents.orchestrator import build_context_prompt
+    from app.services.agents._base import run_with_retry
 
-    _print_full_flow("change", result, deps, api_call_log)
+    deps = _make_deps("change", current_itinerary=_SAMPLE_ITINERARY)
+    prompt = (
+        f"{build_context_prompt(deps)}\n\n---\n\n"
+        "사용자 메시지: 여행 날짜 5월 20일부터 24일로 바꾸고, 예산은 150만원으로 늘려줘."
+    )
+    result = await run_with_retry(orchestrator_agent, prompt, role="orchestrator", deps=deps)
+    out = result.output
 
-    assert deps.captured.get("change") is not None, "submit_change가 호출되지 않음"
+    print(f"\n[change] message: {out.message}")
+    print(f"[change] change : {out.change.model_dump(exclude_none=True) if out.change else None}")
+
+    assert out.change is not None, f"change payload가 비어 있음. message={out.message!r}"
+    assert out.change.start_date == "2026-05-20"
+    assert out.change.end_date == "2026-05-24"
+    assert out.change.budget == 1500000
 
 
 @pytest.mark.asyncio

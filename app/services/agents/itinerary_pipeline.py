@@ -33,7 +33,7 @@ from app.services.adapters.korea_tourism_api import KoreaTourismAdapter
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.travel_agent_service import TravelAgentService
-from ._base import _build_model, preprocessor_agent, run_with_retry, _is_rate_limit_error, _retry_wait
+from ._base import _build_model, acquire_llm_slot, preprocessor_agent, run_with_retry, _is_rate_limit_error, _retry_wait
 
 _service = TravelAgentService({
     "booking":              BookingAdapter(),
@@ -260,6 +260,69 @@ async def _extract_english_city(raw: str) -> str:
     """단일 도시명 영문 추출 (하위 호환용)."""
     result = await _extract_english_cities([raw])
     return result[0]
+
+
+# ── 여행지 안전 검사 (파이프라인 진입 게이트) ────────────────────────────
+
+class SafetyVerdict(BaseModel):
+    unsafe: bool            # 여행 자체가 부적절한 수준의 위험
+    risk_summary: str       # 한국어 이유 요약 — 경고 메시지에 그대로 노출
+    user_consented: bool    # 이미 경고했고 사용자가 진행 의사를 밝혔는지
+
+
+safety_agent = Agent(
+    model=_build_model("preprocessor"),
+    output_type=SafetyVerdict,
+    system_prompt=(
+        "당신은 여행지 안전 판별기입니다. 검색 결과와 대화 맥락만 보고 SafetyVerdict를 반환하라.\n"
+        "unsafe=true 기준 (아래에 해당할 때만):\n"
+        "- 전쟁·내전·무력분쟁 진행 중\n"
+        "- 정부의 여행금지·즉시철수 권고 수준 (한국 외교부 여행경보 3~4단계 상당)\n"
+        "- 일반 관광객 입국이 사실상 불가능한 국가 (제재·미수교 등, 예: 북한)\n"
+        "- 대규모 재난·전염병으로 여행 자체가 제한되는 상황\n"
+        "단순 치안 주의(소매치기·시위 등)는 unsafe=false.\n"
+        "user_consented=true 기준: 이전 대화 요약에 이 여행지의 위험 경고 기록이 있고, "
+        "사용자 메시지가 그럼에도 진행하겠다는 의사(예: '그래도 짜줘', '응 진행해')인 경우."
+    ),
+)
+
+
+async def _check_safety(
+    destinations: list[dict], user_message: str, ai_summary: str | None,
+) -> SafetyVerdict | None:
+    """도시별 안전 정보를 검색한 뒤 LLM 1회로 판정. 실패 시 None (fail-open)."""
+    try:
+        cities = [d["city"] for d in destinations]
+        raw = await asyncio.gather(*[
+            _service.process_task("tavily_search", "search", {
+                "query": f"{c} travel advisory safety warning 여행경보 위험",
+                "search_depth": "basic",
+                "max_results": 5,
+            }) for c in cities
+        ], return_exceptions=True)
+
+        sections = []
+        for city, r in zip(cities, raw):
+            if isinstance(r, Exception) or r.get("status") != "success":
+                continue
+            snippets = "\n".join(
+                f"- {item['title']}: {item['content'][:300]}"
+                for item in r.get("data", [])[:5]
+            )
+            sections.append(f"## {city} 검색 결과\n{snippets}")
+
+        if not sections:
+            return None  # 검색 결과 없음 — 판단 근거 없이 차단하지 않는다
+
+        prompt = "\n\n".join([
+            *sections,
+            f"## 이전 대화 요약\n{ai_summary or '없음'}",
+            f"## 사용자 메시지\n{user_message}",
+        ])
+        result = await run_with_retry(safety_agent, prompt, role="safety")
+        return result.output
+    except Exception:
+        return None
 
 
 # ── Phase 2 플래너 출력 스키마 ───────────────────────────────────────────
@@ -1723,6 +1786,25 @@ async def run_itinerary_pipeline(
     if not destinations or not itinerary.get("start_date"):
         return
 
+    # ── 안전 게이트: 위험 지역이면 경고 후 사용자 동의를 먼저 받는다 ────
+    verdict = await _check_safety(destinations, user_message, deps.ai_summary)
+    if verdict and verdict.unsafe and not verdict.user_consented:
+        warning = (
+            f"⚠️ 요청하신 여행지 관련 안내드립니다.\n\n{verdict.risk_summary}\n\n"
+            "안전상의 이유로 현재 이 지역 여행은 추천드리지 않습니다. "
+            "그럼에도 일정을 만들어드릴까요?"
+        )
+        cities_str = ", ".join(d["city"] for d in destinations)
+        yield warning
+        yield OrchestratorResult(
+            message=warning,
+            ai_summary=(
+                (deps.ai_summary + "\n" if deps.ai_summary else "")
+                + f"{cities_str} 여행 위험 경고 안내함 — 사용자 진행 여부 확인 대기"
+            ),
+        )
+        return
+
     adults = itinerary.get("adult_count") or 1
     children = itinerary.get("child_count") or 0
     child_ages = itinerary.get("child_ages") or []
@@ -1868,6 +1950,7 @@ async def run_itinerary_pipeline(
         origin=origin_raw,
     )
     synth_context = _build_synthesizer_prompt(synth_deps)
+    await acquire_llm_slot("synthesizer")  # run_stream은 run_with_retry를 안 타므로 직접 슬롯 확보
     for attempt in range(4):
         yielded_any = False
         try:

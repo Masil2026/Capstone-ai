@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import date
 
 from fastapi import APIRouter, Depends, Query
@@ -25,8 +26,13 @@ from app.services.agents.context import get_user_embedding, load_context
 from app.services.agents.itinerary_patch import try_patch_itinerary_item
 from app.services.agents.itinerary_pipeline import run_itinerary_pipeline
 from app.services.agents.memory import save_memory
-from app.services.agents.orchestrator import OrchestratorDeps, orchestrator_agent, build_context_prompt
-from app.services.agents._base import run_with_retry, _is_rate_limit_error, _retry_wait
+from app.services.agents.orchestrator import (
+    OrchestratorDeps,
+    build_context_prompt,
+    change_extractor_agent,
+    orchestrator_agent,
+)
+from app.services.agents._base import acquire_llm_slot, run_with_retry, _is_rate_limit_error, _retry_wait
 
 router = APIRouter()
 
@@ -93,6 +99,10 @@ _CHANGE_INTENT_KEYWORDS = (
     "타고",
     "이용",
 )
+# ponytail: 날짜 신호 휴리스틱 — "하루 늦춰줘" 같은 상대 표현은 못 잡음. 누락 사례 쌓이면 패턴 추가
+_DATE_CHANGE_RE = re.compile(r"\d{4}-\d{2}-\d{2}|\d+\s*월\s*\d+\s*일|\d+\s*박|날짜|기간")
+# LLM이 "변경했습니다"라고 완료를 주장하는 메시지 감지 ("변경할까요?" 같은 질문은 제외)
+_CHANGE_CLAIM_RE = re.compile(r"(변경|조정|수정|반영)(했|되었|됐)")
 _CANCEL_INTENT_KEYWORDS = ("취소", "캔슬")
 _RESERVATION_INTENT_KEYWORDS = ("예약", "예매", "새로 잡아", "다시 잡아")
 _RESERVATION_CHANGE_CONFIRM_MESSAGE = "기존 예약을 취소하고 새로 예약할까요?"
@@ -132,11 +142,17 @@ def _should_confirm_reservation_change(user_message: str, reservations: list[dic
     )
 
 
+def _has_date_change_signal(user_message: str) -> bool:
+    """여행 날짜·기간(기본정보) 변경 신호. 있으면 itinerary 강제 보정을 건너뛴다."""
+    return bool(_DATE_CHANGE_RE.search(user_message))
+
+
 def _correct_request_type(request_type: str, user_message: str, current_itinerary: dict | None) -> str:
     """classification 결과를 런타임 컨텍스트로 안전하게 보정한다."""
     if (
         current_itinerary
         and _is_itinerary_item_change_request(user_message)
+        and not _has_date_change_signal(user_message)
         and not _has_explicit_cancel_or_reservation_intent(user_message)
     ):
         return "itinerary"
@@ -164,6 +180,39 @@ def _get_cancel_intercept_message(user_message: str, reservations: list[dict]) -
     항상 '예약처에서 직접 취소' 안내로 응답한다. → LLM 호출·cancel payload 생성 없음.
     """
     return _CANCEL_GUIDANCE_MESSAGE
+
+
+async def _recover_missing_change(
+    user_message: str,
+    deps: OrchestratorDeps,
+    orch_result: OrchestratorResult,
+) -> OrchestratorResult:
+    """변경 완료를 주장하면서 change=null인 응답을 전용 추출기로 복구한다.
+
+    오케스트레이터에 재프롬프트해도 change=null을 반복하므로(실측),
+    output_type=ChangeFields 필수인 change_extractor_agent로 payload를 뽑는다.
+    복구 실패 시 원본을 그대로 반환 → _resolve_done_type이 chat으로 강등 (기존 동작).
+    """
+    itinerary = {
+        k: v for k, v in (deps.current_itinerary or {}).items() if k != "day_plans"
+    }
+    prompt = (
+        f"## 현재 여행 기본 정보\n{json.dumps(itinerary, ensure_ascii=False, default=str)}\n\n"
+        f"## 사용자 요청\n{user_message}\n\n"
+        f"## AI 안내문 (변경 결과 설명)\n{orch_result.message}\n\n"
+        "위에서 변경된 여행 기본 정보 필드만 추출하라."
+    )
+    try:
+        retry = await run_with_retry(change_extractor_agent, prompt, role="change_extractor")
+        if retry.output.model_dump(exclude_none=True):
+            # 이미 스트리밍된 message는 유지하고 누락된 payload만 이식
+            orch_result.change = retry.output
+            print(f"[_stream] change payload 복구: {retry.output.model_dump(exclude_none=True)}", flush=True)
+        else:
+            print("[_stream] 추출기도 변경 필드 없음 — chat으로 강등됨", flush=True)
+    except Exception as e:
+        print(f"[_stream] change payload 추출 실패: {e}", flush=True)
+    return orch_result
 
 
 def _sse(event: str, payload: dict) -> str:
@@ -380,6 +429,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
 
             if orch_result is None:
                 print("[_stream] pipeline None → orchestrator 스트리밍 폴백", flush=True)
+                await acquire_llm_slot("orchestrator")  # run_stream은 버킷을 안 타므로 직접 확보
                 for attempt in range(4):
                     yielded_any = False
                     try:
@@ -404,6 +454,7 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
                             raise
         else:
             print("[_stream] orchestrator_agent.run_stream() 호출", flush=True)
+            await acquire_llm_slot("orchestrator")  # run_stream은 버킷을 안 타므로 직접 확보
             for attempt in range(4):
                 yielded_any = False
                 try:
@@ -427,6 +478,15 @@ async def _stream(body: AiMessageRequest, hide_embedding: bool = False):
                     else:
                         raise
             print(f"[_stream] 스트리밍 완료. message={orch_result.message[:80]!r}", flush=True)
+
+        # change 타입: 완료를 주장하면서 payload가 비면 백엔드 DB 갱신이 조용히 누락됨 → 1회 복구
+        if (
+            request_type == "change"
+            and orch_result.change is None
+            and _CHANGE_CLAIM_RE.search(orch_result.message)
+        ):
+            print("[_stream] change 완료 주장인데 change=null → 전용 추출기로 복구", flush=True)
+            orch_result = await _recover_missing_change(user_message, deps, orch_result)
 
         full_response: str = orch_result.message
 
