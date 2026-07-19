@@ -86,7 +86,9 @@ def _is_day_trip(itinerary: dict) -> bool:
     return bool(start) and start[:10] == end[:10]
 
 
-_TRANSPORT_KEYWORDS = frozenset({"항공 이동", "기내 (비행 중)"})
+# "귀국 항공" 포함 필수 — 합성기가 귀국편을 "… 귀국 항공 (항공사)"로 생성하므로
+# 누락 시 날짜 연장 때 옛 귀국일이 재계획에서 빠져 스텁 일정만 남는다
+_TRANSPORT_KEYWORDS = frozenset({"항공 이동", "기내 (비행 중)", "귀국 항공"})
 
 # 숙소 예약 URL을 붙일 실제 '숙박 성격' 항목을 가리는 키워드.
 # 이동 경로·식사 항목이 place에 호텔명을 우연히 포함해도 예약 링크가 붙지 않도록 한다.
@@ -281,6 +283,8 @@ safety_agent = Agent(
         "- 일반 관광객 입국이 사실상 불가능한 국가 (제재·미수교 등, 예: 북한)\n"
         "- 대규모 재난·전염병으로 여행 자체가 제한되는 상황\n"
         "단순 치안 주의(소매치기·시위 등)는 unsafe=false.\n"
+        "검색 결과에는 과거 시점의 기사(예: 코로나19 팬데믹 시기 경보)가 섞여 있을 수 있다. "
+        "오늘 날짜 기준으로 현재 유효한 경보만 근거로 삼고, 이미 해제됐거나 시점이 오래된 경보는 무시하라.\n"
         "user_consented=true 기준: 이전 대화 요약에 이 여행지의 위험 경고 기록이 있고, "
         "사용자 메시지가 그럼에도 진행하겠다는 의사(예: '그래도 짜줘', '응 진행해')인 경우."
     ),
@@ -289,6 +293,7 @@ safety_agent = Agent(
 
 async def _check_safety(
     destinations: list[dict], user_message: str, ai_summary: str | None,
+    today: str | None = None,
 ) -> SafetyVerdict | None:
     """도시별 안전 정보를 검색한 뒤 LLM 1회로 판정. 실패 시 None (fail-open)."""
     try:
@@ -316,6 +321,7 @@ async def _check_safety(
 
         prompt = "\n\n".join([
             *sections,
+            f"## 오늘 날짜\n{today or date.today().isoformat()}",
             f"## 이전 대화 요약\n{ai_summary or '없음'}",
             f"## 사용자 메시지\n{user_message}",
         ])
@@ -460,6 +466,9 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
         "- 출발 시간 제한 없음. 새벽(00:00~06:00) / 야간(21:00~23:59) 출발도 정상 선택 가능.",
         "- 장거리 국제선(유럽·미주·오세아니아)은 새벽·야간 출발이 일반적이므로 시간대 무관하게 최적 편 선택.",
         "- 가격·경유 횟수·도착 시간을 종합해 최선의 편 선택. 비용이 낮고 경유 적은 편 우선.",
+        "- 단, 새벽(00:00~06:00) 출발 귀국편은 전날 심야 체크아웃과 심야 공항 이동이 필요해 일정 부담이 크다.",
+        "  마지막 날 도착 제약을 지키는 오전~저녁 출발 귀국편이 있으면 그쪽을 우선하고,",
+        "  새벽 편은 대안이 없거나 가격 차이가 매우 클 때만 선택한다. (장거리 노선은 예외 — 위 규칙대로 시간대 무관)",
         f"- ⚠️ 귀국편(return) 필수 제약: {origin_ctx['return_note']} 도착 일자가 반드시 여행 마지막 날({end})이어야 한다.",
         f"  arriving_at 날짜가 {end}을 초과하는 귀국편은 절대 선택 금지.",
         f"  귀국편 데이터에는 {end} 출발편과 {end} 하루 전 출발편이 모두 포함되어 있다. {end} 당일 도착 가능한 편을 우선 선택.",
@@ -759,6 +768,9 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
             "   예) 1일차 '23:45 ~ 23:59 저녁 식사' 다음에는 2일차 '00:00 ~ 07:30 숙소 귀환 및 휴식'을 반드시 넣는다.",
             "⚠️ 늦은 시간에 식당·카페를 무리하게 추가하지 말고, 숙소 귀환 및 휴식을 우선 배치한다.",
             "⚠️ 체크인 후 외부 일정이 없으면 '호텔 체크인 및 휴식'으로 하루를 마무리한다.",
+            "⚠️ 심야~새벽 시간대(00:00~05:00 시작)에 걸치는 체크인·휴식 블록의 plan_name은 반드시",
+            "   '호텔 체크인 및 휴식' 또는 '숙소 귀환 및 휴식'으로 표기한다. '호텔 체크인' 단독 명칭으로",
+            "   여러 시간짜리 항목을 만들지 않는다 (체크인 행위 자체는 30분을 넘지 않는다).",
             "   단, 귀국 항공 이동 이후나 체크아웃 후 바로 공항으로 이동하는 마지막 날에는 숙소 귀환 항목을 만들지 않는다.",
         ]
 
@@ -1787,7 +1799,7 @@ async def run_itinerary_pipeline(
         return
 
     # ── 안전 게이트: 위험 지역이면 경고 후 사용자 동의를 먼저 받는다 ────
-    verdict = await _check_safety(destinations, user_message, deps.ai_summary)
+    verdict = await _check_safety(destinations, user_message, deps.ai_summary, deps.today)
     if verdict and verdict.unsafe and not verdict.user_consented:
         warning = (
             f"⚠️ 요청하신 여행지 관련 안내드립니다.\n\n{verdict.risk_summary}\n\n"

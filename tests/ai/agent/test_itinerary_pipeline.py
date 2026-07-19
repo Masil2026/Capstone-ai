@@ -124,6 +124,11 @@ class TestIsTransportDay:
         item = _plan("숙소 → 인천국제공항 이동 (공항버스)")
         assert _is_transport_day([item]) is False
 
+    def test_return_flight_without_idong_suffix_detected(self):
+        """실제 합성기 출력 형식 '… 귀국 항공 (항공사)' — '이동' 없이도 교통일로 인식"""
+        item = _plan("도쿄 하네다(HND) → 인천국제공항(ICN) 귀국 항공 (Peach Aviation)")
+        assert _is_transport_day([item]) is True
+
 
 # ── _normalize_overnight_day_plans ────────────────────────────────────────────
 
@@ -232,6 +237,27 @@ class TestGetReplanDates:
         # 변경 없는 날짜는 adjusted에 유지
         assert "2026-05-16" in adjusted
         assert "2026-05-17" in adjusted
+
+    def test_shift_by_one_day_replans_old_return_day(self):
+        """전체 하루 밀기(8/15~18 → 8/16~19) — 옛 귀국일이 '귀국 항공' 표기여도 재계획에 포함.
+
+        회귀 배경: '귀국 항공 (항공사)' 표기가 교통일로 인식되지 않아 옛 귀국일(8/18)이
+        재계획에서 빠지고, 합성기가 8/18에 스텁 항목만 남기는 문제가 있었다.
+        """
+        itinerary = {
+            "destinations": [_dest("도쿄", "2026-08-16", "2026-08-19")],  # 15~18에서 하루 밀기
+            "day_plans": {
+                "2026-08-15": [_flight_plan()],
+                "2026-08-16": [_content_plan()],
+                "2026-08-17": [_content_plan()],
+                "2026-08-18": [_plan("도쿄 하네다(HND) → 인천국제공항(ICN) 귀국 항공 (Peach Aviation)")],
+            },
+        }
+        adjusted, replan = _get_replan_dates_for_date_change(itinerary)
+
+        assert "2026-08-18" in replan       # 옛 귀국일 — 온전한 관광일로 재계획돼야 함
+        assert "2026-08-19" in replan       # 새 마지막 날 (귀국편 배치)
+        assert "2026-08-18" not in adjusted # 옛 귀국편 내용은 참고용 기존 일정에서도 제거
 
     def test_end_extension_overnight_return_flight(self):
         """마지막에 2일 연장 + 야간 귀국편(m=2, 출발일+도착일) → 4일 재계획"""
