@@ -27,6 +27,7 @@ async def save_history(room_id: str, messages: list[ModelMessage]) -> None:
     await _redis.set(
         f"chat_history:{room_id}",
         ModelMessagesTypeAdapter.dump_json(messages),
+        ex=settings.REDIS_TTL_SECONDS,
     )
 
 
@@ -35,6 +36,7 @@ async def save_raw_history(room_id: str, messages: list[dict]) -> None:
     await _redis.set(
         f"chatroom_history:{room_id}",
         json.dumps(messages, ensure_ascii=False),
+        ex=settings.REDIS_TTL_SECONDS,
     )
     print(f"[save_raw_history] chatroom_history:{room_id} → {len(messages)}건 저장", flush=True)
 
@@ -44,6 +46,7 @@ async def save_pg_history(room_id: str, messages: list[dict]) -> None:
     await _redis.set(
         f"pgchatroom_history:{room_id}",
         json.dumps(messages, ensure_ascii=False),
+        ex=settings.REDIS_TTL_SECONDS,
     )
     print(f"[save_pg_history] pgchatroom_history:{room_id} → {len(messages)}건 저장", flush=True)
 
@@ -71,4 +74,8 @@ def _normalize_ai_summary(ai_summary: str | list[str] | None) -> str | None:
 
 async def save_memory(room_id: str, ai_summary: str | list[str] | None, preferences: dict | None) -> None:
     payload = {"ai_summary": _normalize_ai_summary(ai_summary), "preferences": preferences}
-    await _redis.set(f"memory:{room_id}", json.dumps(payload, ensure_ascii=False))
+    await _redis.set(
+        f"memory:{room_id}",
+        json.dumps(payload, ensure_ascii=False),
+        ex=settings.REDIS_TTL_SECONDS,
+    )
