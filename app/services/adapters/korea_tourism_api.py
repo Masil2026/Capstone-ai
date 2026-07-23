@@ -1,8 +1,59 @@
+import re
+
 import httpx
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 from app.core.ApiToolsInterfaces import ApiTools
 from app.core.config import settings
+
+
+# 시도(17개) 법정동 코드 매핑.
+# (lDongRegnCd, addr1 접두사, 도시명 별칭들) — 별칭엔 대표 관광도시(시군구)도 포함해 게이팅 히트율을 높인다.
+# ⚠️ 강원=51 / 전북=52 는 특별자치도 신규 코드(구코드 42·45는 0건). addr1 접두사는 startswith 매칭용.
+_SIDO_TABLE: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    ("11", "서울",     ("서울", "서울특별시", "서울시")),
+    ("26", "부산",     ("부산", "부산광역시", "부산시")),
+    ("27", "대구",     ("대구", "대구광역시")),
+    ("28", "인천",     ("인천", "인천광역시")),
+    ("29", "광주",     ("광주", "광주광역시")),           # 광주=광역시(전남 아님)
+    ("30", "대전",     ("대전", "대전광역시")),
+    ("31", "울산",     ("울산", "울산광역시")),
+    ("36", "세종",     ("세종", "세종특별자치시", "세종시")),
+    ("41", "경기",     ("경기", "경기도", "수원", "수원시", "가평", "파주", "용인", "고양", "성남")),
+    ("51", "강원",     ("강원", "강원도", "강원특별자치도", "강릉", "속초", "춘천", "원주", "평창", "정선")),
+    ("43", "충청북도", ("충북", "충청북도", "청주", "청주시", "제천", "단양")),
+    ("44", "충청남도", ("충남", "충청남도", "천안", "보령", "공주", "부여")),
+    ("52", "전북",     ("전북", "전라북도", "전북특별자치도", "전주", "전주시", "군산", "남원")),
+    ("46", "전라남도", ("전남", "전라남도", "여수", "순천", "목포", "담양")),
+    ("47", "경상북도", ("경북", "경상북도", "경주", "경주시", "안동", "포항")),
+    ("48", "경상남도", ("경남", "경상남도", "통영", "거제", "창원", "진주", "남해")),
+    ("50", "제주",     ("제주", "제주도", "제주특별자치도", "제주시", "서귀포", "서귀포시")),
+)
+
+# 별칭 → 코드 / 코드 → addr1 접두사 (모듈 로드 시 1회 구성)
+_ALIAS_TO_CODE: Dict[str, str] = {
+    alias: code for code, _prefix, aliases in _SIDO_TABLE for alias in aliases
+}
+_CODE_TO_PREFIX: Dict[str, str] = {code: prefix for code, prefix, _aliases in _SIDO_TABLE}
+
+
+def _normalize_city(city: Optional[str]) -> str:
+    """도시명 정규화 — 앞 토큰만 취해 공백 제거. 예) '제주도, Jeju' → '제주도'."""
+    if not city:
+        return ""
+    head = re.split(r"[,(（/]", city)[0]
+    return re.sub(r"\s+", "", head)
+
+
+def resolve_regn_code(city: Optional[str]) -> Optional[str]:
+    """도시명 → 시도 법정동 코드(lDongRegnCd). 매핑에 없으면 None (해외·미매핑 → 스킵)."""
+    return _ALIAS_TO_CODE.get(_normalize_city(city))
+
+
+def resolve_addr_prefix(city: Optional[str]) -> Optional[str]:
+    """도시명 → addr1 후처리 필터용 시도 접두사. 예) '제주도' → '제주'."""
+    code = resolve_regn_code(city)
+    return _CODE_TO_PREFIX.get(code) if code else None
 
 
 class KoreaTourismAdapter(ApiTools):
