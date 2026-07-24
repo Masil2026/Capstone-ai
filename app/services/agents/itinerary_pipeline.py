@@ -1964,11 +1964,18 @@ async def _attach_media(
         np = _norm_place(_item_get(item, "place"))  # 장소
         if np and np in place_map:
             return place_map[np], None
-        for key, img in place_map.items():
-            # place는 합성기가 상세 주소로 채우는 경우가 많아 장소명이 안 남는다 —
-            # plan_name까지 포함한 hay로 비교해야 실사용 데이터에서 매칭된다.
-            if key and (key in hay or key in np or np in key):
-                return img, None
+        # 폴백: 장소명(key)이 항목 텍스트에 실제로 등장할 때만 매칭.
+        # place는 합성기가 상세 주소로 채우는 경우가 많아 plan_name까지 포함해 비교한다.
+        # ⚠️ 'A → B 이동' 항목은 도착지(B)만 대상으로 삼는다 — plan_name에 출발지(A)가 들어 있어
+        #    도착지에 이미지가 없을 때 출발지 이미지를 잘못 끌어오는 문제를 막는다.
+        # ⚠️ 과거의 'np in key' 방향은 제거 — 일반 지명(place='서귀포시'·'성산')이 관광지명의
+        #    부분문자열이면 무관한 이미지를 끌어오는 오매칭을 유발했다.
+        # 길이 3+ 의 구체적 key만, 긴 이름 우선으로 매칭해 짧은/일반 명칭의 오염을 막는다.
+        dest_side = plan_name.split("→")[-1] if "→" in plan_name else plan_name
+        place_hay = _norm_place(dest_side) + "|" + np
+        for key in sorted(place_map, key=len, reverse=True):
+            if len(key) >= 3 and key in place_hay:
+                return place_map[key], None
         return None, None
 
     for items in day_plans.values():

@@ -117,3 +117,40 @@ def test_korea_keyword_skips_festivals():
 def test_korea_keyword_keeps_real_attraction():
     """일반 관광지는 그대로 키워드 추출(스킵되지 않음)."""
     assert p._korea_keyword("성산일출봉 제주 (Seongsan Ilchulbong)", "제주도") == "성산일출봉"
+
+
+# ─────────────────── image_url 오매칭(일반 지명 오염) 방지 ─────────────────── #
+
+@pytest.mark.asyncio
+async def test_attach_media_no_generic_place_bleed():
+    """항목의 일반 지명(place='성산')이 관광지명(성산일출봉) 이미지를 끌어오지 않는다.
+
+    반면 실제 관광지 항목(place='성산일출봉')에는 정상적으로 이미지가 붙는다.
+    과거 'np in key' 부분문자열 매칭이 호텔·식당 등 무관 항목에 이미지를 오배치하던 버그 회귀 방지.
+    """
+    place_results = {
+        "성산일출봉 제주 (Seongsan)": {
+            "status": "success",
+            "image_url": "IMG_SEONGSAN",
+            "data": {"places": [{"name": "성산일출봉"}]},
+        },
+    }
+    day_plans = {
+        "2026-09-01": [
+            {"plan_name": "호텔 체크인 및 휴식", "place": "성산", "note": ""},      # 일반 지명 → 이미지 X
+            {"plan_name": "성산일출봉 탐방", "place": "성산일출봉", "note": ""},      # 정확 → 이미지 O
+            {"plan_name": "관람", "place": "제주특별자치도 서귀포시 성산일출봉로 284", "note": ""},  # 주소 폴백 → O
+            {"plan_name": "성산일출봉 → 우도 이동 (배)", "place": "우도", "note": ""},  # 이동: 도착지(우도) 이미지 없음 → X
+            {"plan_name": "숙소 → 성산일출봉 이동 (택시)", "place": "제주특별자치도 서귀포시 성산읍", "note": ""},  # 이동: 도착지 이미지 O
+        ]
+    }
+    out = await p._attach_media(
+        day_plans, p.PlannerOutput(days=[]), place_results,
+        flight_legs=[], hotels_by_city={}, adults=2, child_ages=[],
+    )
+    items = out["2026-09-01"]
+    assert items[0].get("image_url") is None            # 호텔 항목엔 오염 없음
+    assert items[1].get("image_url") == "IMG_SEONGSAN"  # 관광지 항목엔 정상 부착
+    assert items[2].get("image_url") == "IMG_SEONGSAN"  # 주소에 관광지명 포함 → 폴백 정상 동작
+    assert items[3].get("image_url") is None            # 이동 항목: 출발지(성산일출봉) 이미지 오부착 안 함
+    assert items[4].get("image_url") == "IMG_SEONGSAN"  # 이동 항목: 도착지(성산일출봉) 이미지는 정상 부착
