@@ -53,7 +53,8 @@ async def test_success_on_first_try():
     mock_agent.run = AsyncMock(return_value=MagicMock(output="성공"))
 
     with patch("app.services.agents._base.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        result = await run_with_retry(mock_agent, "프롬프트", role="test")
+        with patch.object(_flash_bucket, "acquire", new_callable=AsyncMock):
+            result = await run_with_retry(mock_agent, "프롬프트", role="test")
 
     assert result.output == "성공"
     mock_agent.run.assert_called_once_with("프롬프트")

@@ -28,7 +28,7 @@ def test_tavily_basic_search():
         "query": "오사카 여행 명소",
         "search_depth": "basic",
         "max_results": 5,
-    })
+    }, timeout=30.0)
     assert response.status_code == 200
     data = response.json()
 
@@ -50,7 +50,7 @@ def test_tavily_advanced_search():
         "query": "오사카 여행 명소",
         "search_depth": "advanced",
         "max_results": 5,
-    })
+    }, timeout=30.0)
     assert response.status_code == 200
     data = response.json()
 
@@ -73,7 +73,7 @@ def test_tavily_with_answer():
         "search_depth": "basic",
         "max_results": 5,
         "include_answer": True,
-    })
+    }, timeout=30.0)
     assert response.status_code == 200
     data = response.json()
 
