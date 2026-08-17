@@ -34,7 +34,7 @@ class GeminiFlashJudge(DeepEvalBaseLLM):
             location=settings.GOOGLE_CLOUD_REGION,
             credentials=creds,
         )
-        self._model = settings.PREPROCESSOR_MODEL or "gemini-2.5-flash"
+        self._model = settings.PREPROCESSOR_MODEL or "gemini-3.5-flash-lite"
 
     def load_model(self):
         return self._client

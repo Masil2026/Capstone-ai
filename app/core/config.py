@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     PREPROCESSOR_MODEL: Optional[str] = None
 
     GOOGLE_CLOUD_PROJECT: Optional[str] = None
-    GOOGLE_CLOUD_REGION: str = "us-central1"
+    GOOGLE_CLOUD_REGION: str = "global"  # gemini-3.x는 global에서만 서빙 (2.5는 2026-10-20 지원 종료)
     GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None  # GCP 서비스 계정 키 파일 경로
 
     # --- Database & Redis ---

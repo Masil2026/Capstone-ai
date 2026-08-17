@@ -6,7 +6,9 @@ import time
 from app.core.config import settings
 
 _PROVIDER_DEFAULTS = {
-    "vertexai": {"orchestrator": "gemini-2.5-pro", "preprocessor": "gemini-2.5-flash"},
+    # gemini-2.5-* 는 2026-10-20 Agent Platform(Vertex AI) 지원 종료 — 3.x로 이전.
+    # Gemini 3 Pro는 이 프로젝트에 접근 권한이 없어(404) orchestrator도 flash 계열 사용.
+    "vertexai": {"orchestrator": "gemini-3.7-flash", "preprocessor": "gemini-3.5-flash-lite"},
 }
 
 
