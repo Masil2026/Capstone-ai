@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, AsyncGenerator
 
@@ -29,10 +29,15 @@ from app.core.config import settings
 from app.schemas.ai_message import OrchestratorResult
 from app.services.adapters.booking_api import BookingAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
-from app.services.adapters.korea_tourism_api import KoreaTourismAdapter
+from app.services.adapters.korea_tourism_api import (
+    KoreaTourismAdapter,
+    resolve_addr_prefix,
+    resolve_regn_code,
+)
 from app.services.adapters.tavily_search import TavilySearchAdapter
 from app.services.adapters.weather_api import WeatherAdapter
 from app.services.travel_agent_service import TravelAgentService
+from app.services.agents.memory import _redis
 from ._base import _build_model, acquire_llm_slot, preprocessor_agent, run_with_retry, _is_rate_limit_error, _retry_wait
 
 _service = TravelAgentService({
@@ -385,6 +390,8 @@ class PlannerDeps:
     today: str
     similar_messages: list[dict]
     replan_dates: list[str]      # 날짜 변경으로 재계획이 필요한 날짜 목록 (없으면 [])
+    korea_attractions: dict = field(default_factory=dict)  # city → areaBasedList2 결과 (국내만)
+    korea_festivals: list[dict] = field(default_factory=list)  # 기간 내 국내 축제 (addr1 필터됨)
     is_day_trip: bool = False    # 시작일==종료일(0박) 당일치기 여부
     origin: str | None = None    # 출발지 (한국어 원본, 미입력 시 None)
 
@@ -583,6 +590,9 @@ def _build_planner_prompt(d: PlannerDeps) -> str:
                     f"강수{w.get('precipitation_probability_max', w.get('precipitation_sum', '?'))}%"
                 )
 
+    lines += _korea_attractions_section(d.korea_attractions)
+    lines += _korea_festivals_section(d.korea_festivals)
+
     lines += ["", "## 여행지 정보 (도시별)"]
     for dest in destinations:
         city = dest["city"]
@@ -624,6 +634,7 @@ class SynthesizerDeps:
     similar_messages: list[dict]
     attraction_prices: dict[str, str]   # place_name → Tavily 입장료 검색 결과 (없으면 {})
     replan_dates: list[str]             # 날짜 변경으로 재계획이 필요한 날짜 목록 (없으면 [])
+    korea_festivals: list[dict] = field(default_factory=list)  # 기간 내 국내 축제 (addr1 필터됨)
     is_day_trip: bool = False           # 시작일==종료일(0박) 당일치기 여부
     origin: str | None = None           # 출발지 (한국어 원본, 미입력 시 None)
 
@@ -697,6 +708,8 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
     ]
     for dest in destinations:
         lines.append(f"- {dest['city']}: {dest['start_date']} ~ {dest['end_date']}")
+
+    lines += _korea_festivals_section(d.korea_festivals, for_synthesizer=True)
 
     lines += [
         "",
@@ -935,9 +948,11 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
                 p = places[0]
                 price_label = p.get("price_level_label")
                 price_str = f" | 가격대: {price_label}(0~4 상대 척도)" if price_label else ""
+                korea_addr = result.get("korea_addr")
+                addr_str = f" | 공식주소(관광공사): {korea_addr}" if korea_addr else ""
                 lines.append(
                     f"- [{query}] → {p.get('name')} | {p.get('formatted_address','')} | "
-                    f"평점 {p.get('rating','?')} ({p.get('user_ratings_total','?')}명){price_str}"
+                    f"평점 {p.get('rating','?')} ({p.get('user_ratings_total','?')}명){price_str}{addr_str}"
                 )
 
     if d.attraction_prices:
@@ -987,6 +1002,174 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         lines += [f"### {city}", summary]
 
     return "\n".join(lines)
+
+
+# ── 한국관광공사(TourAPI) 캐싱 + Phase 1 fetch ────────────────────────────
+#
+# 일일 트래픽 각 1000건 제약 → 동일 지역/기간/키워드 반복 호출을 Redis로 방지.
+# memory.py의 Redis 클라이언트를 재사용하고 네임스페이스 tourapi:* + TTL 24h를 쓴다.
+# (관광지·축제 데이터는 하루 단위로 거의 불변)
+
+_KOREA_CACHE_TTL = 86400  # 24h
+
+
+async def _korea_cached(action: str, params: dict, cache_key: str) -> dict:
+    """korea_tourism 호출을 Redis로 캐싱. 키 = tourapi:{cache_key}. 성공 결과만 저장."""
+    full_key = f"tourapi:{cache_key}"
+    try:
+        cached = await _redis.get(full_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass  # 캐시 장애는 무시하고 원본 호출로 진행
+    result = await _service.process_task("korea_tourism", action, params)
+    if isinstance(result, dict) and result.get("status") == "success":
+        try:
+            await _redis.set(full_key, json.dumps(result, ensure_ascii=False), ex=_KOREA_CACHE_TTL)
+        except Exception:
+            pass
+    return result
+
+
+async def _fetch_korea_attractions(destinations: list[dict]) -> dict[str, dict]:
+    """국내 목적지별 areaBasedList2(관광지) 후보를 수집한다. 반환: {city → 어댑터 결과}.
+
+    시도 매핑에 없는 도시(해외·미매핑)는 호출 없이 스킵. contentTypeId=12(관광지) +
+    시도코드 + 이미지 우선 정렬(arrange=Q: 대표이미지+수정일순)로 '쓸 만한' 후보를 상위에 둔다.
+    """
+    async def _one(dest: dict) -> tuple[str, dict]:
+        city = dest["city"]
+        regn = resolve_regn_code(city)
+        if not regn:
+            return city, {"status": "skipped"}
+        params = {"contentTypeId": 12, "lDongRegnCd": regn, "numOfRows": 20, "arrange": "Q"}
+        res = await _korea_cached("area_based_list", params, f"area:{regn}:12")
+        return city, res
+
+    results = await asyncio.gather(*[_one(d) for d in destinations], return_exceptions=True)
+    out: dict[str, dict] = {}
+    for r in results:
+        if isinstance(r, Exception):
+            continue
+        city, res = r
+        out[city] = res
+    return out
+
+
+def _festival_matches(item: dict, trip_start: str, trip_end: str, prefixes: tuple[str, ...]) -> bool:
+    """축제가 (1)여행 기간과 겹치고 (2)목적지 시도(addr1 접두사)에 속하는지 판정.
+
+    trip_start/trip_end: YYYYMMDD. addr1은 지역코드가 표준 외 더미(예: '전남광주통합특별시')를
+    포함할 수 있어 lDongRegnCd 숫자 매칭 대신 addr1 문자열 접두사로 후처리 필터한다.
+    """
+    addr = item.get("addr1") or ""
+    if not any(addr.startswith(p) for p in prefixes):
+        return False
+    s = item.get("eventstartdate")
+    e = item.get("eventenddate") or s
+    if not s:
+        return False
+    return s <= trip_end and e >= trip_start  # YYYYMMDD 문자열 비교로 기간 overlap 판정
+
+
+async def _fetch_korea_festivals(destinations: list[dict], dates: list[str]) -> list[dict]:
+    """여행 기간과 겹치는 국내 축제를 전국 조회 후 addr1 접두사로 후처리 필터한다.
+
+    - 게이팅: 목적지 중 국내 시도가 하나도 없으면 빈 리스트.
+    - 조회: eventStartDate=여행 시작일(TourAPI는 "그 날짜 기준 진행 중" 의미라 장기 축제도 포착) →
+      전국을 numOfRows 넉넉히 받아 응답을 기간 overlap + 시도(addr1)로 로컬 필터.
+      ⚠️ 지역 필터를 로컬에서 하므로 전국 결과를 전량 받아야 한다. numOfRows가 totalCount보다
+      작으면 관련 축제를 놓친다(수정일순 정렬이라 특정 지역이 뒷페이지로 밀림). 넉넉히 1000.
+    """
+    prefixes = tuple({p for d in destinations if (p := resolve_addr_prefix(d["city"]))})
+    if not prefixes or not dates:
+        return []
+
+    trip_start_dt = date.fromisoformat(dates[0])
+    trip_end_dt = date.fromisoformat(dates[-1])
+    trip_start = trip_start_dt.strftime("%Y%m%d")
+    trip_end = trip_end_dt.strftime("%Y%m%d")
+
+    params = {"eventStartDate": trip_start, "numOfRows": 1000, "arrange": "C"}
+    res = await _korea_cached("search_festival", params, f"festival:{trip_start}:{trip_end}")
+    if not isinstance(res, dict) or res.get("status") != "success":
+        return []
+
+    data = res.get("data") or {}
+    items = data.get("items") or []
+    total = data.get("total_count")
+    if total and len(items) < total:  # 전량 확보 실패 → 뒷페이지 축제 누락 경고
+        _log.warning("[korea_festivals] fetched %d < total %d — numOfRows 상향 필요", len(items), total)
+
+    matched = [it for it in items if _festival_matches(it, trip_start, trip_end, prefixes)]
+    matched.sort(key=lambda it: it.get("eventstartdate") or "")
+    return matched
+
+
+def _fmt_yyyymmdd(v: str | None) -> str:
+    """YYYYMMDD → YYYY-MM-DD (형식이 아니면 원본 유지)."""
+    if not v or len(v) != 8 or not v.isdigit():
+        return v or ""
+    return f"{v[:4]}-{v[4:6]}-{v[6:]}"
+
+
+def _korea_attractions_section(korea_attractions: dict) -> list[str]:
+    """플래너용 '## 후보 관광지' 섹션 라인. 국내 후보가 없으면 빈 리스트."""
+    body: list[str] = []
+    for city, res in korea_attractions.items():
+        if not isinstance(res, dict) or res.get("status") != "success":
+            continue
+        items = (res.get("data") or {}).get("items") or []
+        if not items:
+            continue
+        body.append(f"### {city}")
+        for it in items[:20]:
+            title = it.get("title") or ""
+            if not title:
+                continue
+            addr = it.get("addr1") or ""
+            body.append(f"  - {title} | {addr}".rstrip(" |").rstrip())
+    if not body:
+        return []
+    return [
+        "",
+        "## 후보 관광지 (한국관광공사 TourAPI — 참고용, 강제 아님)",
+        "아래는 해당 지역의 실제 관광지 목록이다. ordered_queries를 이 스팟들에 근거해 구성하되,",
+        "사용자 취향·웹 정보와 균형을 맞추고 전부를 그대로 넣지는 않는다.",
+    ] + body
+
+
+def _korea_festivals_section(korea_festivals: list[dict], for_synthesizer: bool = False) -> list[str]:
+    """'## 기간 내 축제' 섹션 라인. 없으면 빈 리스트.
+
+    for_synthesizer=True면 최종 일정(day_plans)·message에 실제로 반영하라는 강한 지시,
+    False(플래너)면 ordered_queries에 반영하라는 지시를 붙인다.
+    """
+    if not korea_festivals:
+        return []
+    if for_synthesizer:
+        directive = [
+            "여행 날짜·동선에 자연스럽게 맞는 축제가 있으면 **최소 1개는 해당 날짜 day_plans 항목으로 포함**하고,",
+            "message에도 그 축제를 언급하라. 단, 동선을 크게 벗어나면서까지 넣지는 말 것.",
+            "⚠️ 제목/주소에 특정 요일·장소 조건(예: '주말', '금토', 특정 시장·거리)이 드러나면 "
+            "여행 날짜·동선이 실제로 맞을 때만 포함한다. 맞지 않으면 넣지 않는다.",
+        ]
+    else:
+        directive = [
+            "여행 날짜·동선에 맞는 축제가 있으면 해당 날짜 ordered_queries에 축제명을 포함하라.",
+            "⚠️ 제목에 특정 요일(예: '주말', '금토')이 명시되면 여행 날짜가 그 요일과 맞을 때만 포함한다.",
+        ]
+    lines = ["", "## 기간 내 축제 (여행 기간에 열리는 국내 행사)"] + directive
+    for it in korea_festivals[:15]:
+        title = it.get("title") or ""
+        if not title:
+            continue
+        addr = it.get("addr1") or ""
+        s = _fmt_yyyymmdd(it.get("eventstartdate"))
+        e = _fmt_yyyymmdd(it.get("eventenddate"))
+        period = f"{s} ~ {e}" if s else ""
+        lines.append(f"  - {title} | {addr} | {period}".rstrip(" |").rstrip())
+    return lines
 
 
 # ── Phase 1 헬퍼 함수들 ──────────────────────────────────────────────────
@@ -1355,7 +1538,13 @@ def _norm_place(s: str | None) -> str:
     return re.sub(r"\s+", "", (s or "")).lower()
 
 
-_KOREA_SKIP_WORDS = ("식사", "맛집", "근처", "이동", "점심", "저녁", "아침", "브런치", "야식", "야시장", "카페")
+# searchKeyword2(Phase 3) 대상이 아닌 서술형 검색어를 거른다.
+# 축제류(페스티벌·비엔날레 등)는 Phase 1 searchFestival2에서 이미 데이터를 받으므로
+# 여기서 다시 키워드 검색하면 대부분 0건 → quota 낭비. 스킵한다.
+_KOREA_SKIP_WORDS = (
+    "식사", "맛집", "근처", "이동", "점심", "저녁", "아침", "브런치", "야식", "야시장", "카페",
+    "축제", "페스티벌", "비엔날레", "문화제",
+)
 
 
 def _korea_keyword(query: str, city_kr: str | None) -> str | None:
@@ -1378,25 +1567,30 @@ def _korea_keyword(query: str, city_kr: str | None) -> str | None:
     return q
 
 
-def _korea_pick_image(raw: Any, query: str) -> tuple[str | None, str | None]:
-    """한국관광공사 검색 결과에서 query와 확신 매칭되는 항목의 (image_url, contentid).
+def _korea_pick_image(raw: Any, query: str) -> tuple[str | None, str | None, str | None]:
+    """한국관광공사 검색 결과에서 query와 확신 매칭되는 항목의 (image_url, contentid, addr1).
 
     image_url = firstimage 우선 → 없으면 firstimage2 → 둘 다 없으면 None.
-    매칭 실패 시 (None, None) — 해외 장소는 결과가 비어 자연히 매칭 안 됨.
+    addr1 = 공식 행정주소(합성기 프롬프트에 활용). 매칭 실패 시 (None, None, None).
+    해외 장소는 결과가 비어 자연히 매칭 안 됨.
     """
     if not isinstance(raw, dict) or raw.get("status") != "success":
-        return (None, None)
+        return (None, None, None)
     items = ((raw.get("data") or {}).get("items")) or []
     nq = _norm_place(query)
     for it in items:
         nt = _norm_place(it.get("title"))
         if nt and (nt in nq or nq in nt):
             img = it.get("firstimage") or it.get("firstimage2")
-            return (img or None, it.get("contentid"))
+            return (img or None, it.get("contentid"), it.get("addr1") or None)
     if len(items) == 1:  # 결과가 하나뿐이면 그 항목으로 간주
         it = items[0]
-        return (it.get("firstimage") or it.get("firstimage2") or None, it.get("contentid"))
-    return (None, None)
+        return (
+            it.get("firstimage") or it.get("firstimage2") or None,
+            it.get("contentid"),
+            it.get("addr1") or None,
+        )
+    return (None, None, None)
 
 
 async def _fetch_places(planner_output: PlannerOutput) -> dict[str, dict]:
@@ -1414,7 +1608,8 @@ async def _fetch_places(planner_output: PlannerOutput) -> dict[str, dict]:
     async def _korea_call(kw: str | None):
         if not kw:  # 식사·이동 등은 한국관광공사 대상 아님 → 스킵
             return {"status": "skip"}
-        return await _service.process_task("korea_tourism", "search_keyword", {"keyword": kw, "numOfRows": 5})
+        # 키워드 검색은 quota 최대 소비처 → 캐싱(동일 키워드 반복 방지)
+        return await _korea_cached("search_keyword", {"keyword": kw, "numOfRows": 5}, f"keyword:{kw}")
 
     # google_maps(장소·평점)와 korea_tourism(국내 이미지)을 병렬 호출 — 해외는 korea가 빈 결과
     google_res, korea_res = await asyncio.gather(
@@ -1431,9 +1626,10 @@ async def _fetch_places(planner_output: PlannerOutput) -> dict[str, dict]:
     result: dict[str, dict] = {}
     for q, kw, g, k in zip(queries, korea_keywords, google_res, korea_res):
         entry = dict(g) if not isinstance(g, Exception) and isinstance(g, dict) else {"status": "error"}
-        image_url, contentid = _korea_pick_image(k, kw or q)   # 정제된 장소명으로 매칭
+        image_url, contentid, korea_addr = _korea_pick_image(k, kw or q)   # 정제된 장소명으로 매칭
         entry["image_url"] = image_url      # 한국관광공사 firstimage (없으면 None)
         entry["contentid"] = contentid
+        entry["korea_addr"] = korea_addr    # 공식 행정주소 (합성기 프롬프트용, 없으면 None)
         result[q] = entry
     return result
 
@@ -1768,11 +1964,18 @@ async def _attach_media(
         np = _norm_place(_item_get(item, "place"))  # 장소
         if np and np in place_map:
             return place_map[np], None
-        for key, img in place_map.items():
-            # place는 합성기가 상세 주소로 채우는 경우가 많아 장소명이 안 남는다 —
-            # plan_name까지 포함한 hay로 비교해야 실사용 데이터에서 매칭된다.
-            if key and (key in hay or key in np or np in key):
-                return img, None
+        # 폴백: 장소명(key)이 항목 텍스트에 실제로 등장할 때만 매칭.
+        # place는 합성기가 상세 주소로 채우는 경우가 많아 plan_name까지 포함해 비교한다.
+        # ⚠️ 'A → B 이동' 항목은 도착지(B)만 대상으로 삼는다 — plan_name에 출발지(A)가 들어 있어
+        #    도착지에 이미지가 없을 때 출발지 이미지를 잘못 끌어오는 문제를 막는다.
+        # ⚠️ 과거의 'np in key' 방향은 제거 — 일반 지명(place='서귀포시'·'성산')이 관광지명의
+        #    부분문자열이면 무관한 이미지를 끌어오는 오매칭을 유발했다.
+        # 길이 3+ 의 구체적 key만, 긴 이름 우선으로 매칭해 짧은/일반 명칭의 오염을 막는다.
+        dest_side = plan_name.split("→")[-1] if "→" in plan_name else plan_name
+        place_hay = _norm_place(dest_side) + "|" + np
+        for key in sorted(place_map, key=len, reverse=True):
+            if len(key) >= 3 and key in place_hay:
+                return place_map[key], None
         return None, None
 
     for items in day_plans.values():
@@ -1855,11 +2058,15 @@ async def run_itinerary_pipeline(
         _no_hotels(destinations) if is_day_trip
         else _fetch_hotels_all(cities_en, destinations, adults, children, child_ages)
     )
-    web_summaries, weather_by_city, flight_legs, hotels_by_city = await asyncio.gather(
+    all_dates = _all_dates(destinations)
+    (web_summaries, weather_by_city, flight_legs, hotels_by_city,
+     korea_attractions, korea_festivals) = await asyncio.gather(
         _fetch_web_summaries(destinations, deps.preferences),
         _fetch_weather_all(destinations, deps.today),
         _fetch_flight_legs(destinations, cities_en, adults, children, child_ages, origin_en),
         hotels_coro,
+        _fetch_korea_attractions(destinations),
+        _fetch_korea_festivals(destinations, all_dates),
     )
 
     print(
@@ -1867,7 +2074,9 @@ async def run_itinerary_pipeline(
         f"\n  web_summaries  : {list(web_summaries.keys())}"
         f"\n  weather_by_city: {[(k, len(v)) for k, v in weather_by_city.items()]}"
         f"\n  flight_legs    : {[(l['direction'], l['data'].get('status')) for l in flight_legs]}"
-        f"\n  hotels_by_city : {[(k, v.get('status')) for k, v in hotels_by_city.items()]}",
+        f"\n  hotels_by_city : {[(k, v.get('status')) for k, v in hotels_by_city.items()]}"
+        f"\n  korea_attract  : {[(k, len((v.get('data') or {}).get('items', []) if isinstance(v, dict) else [])) for k, v in korea_attractions.items()]}"
+        f"\n  korea_festivals: {len(korea_festivals)}건",
         flush=True,
     )
 
@@ -1884,6 +2093,8 @@ async def run_itinerary_pipeline(
         today=deps.today,
         similar_messages=deps.similar_messages,
         replan_dates=replan_dates,
+        korea_attractions=korea_attractions,
+        korea_festivals=korea_festivals,
         is_day_trip=is_day_trip,
         origin=origin_raw,
     )
@@ -1962,6 +2173,7 @@ async def run_itinerary_pipeline(
         similar_messages=deps.similar_messages,
         attraction_prices=attraction_prices,
         replan_dates=replan_dates,
+        korea_festivals=korea_festivals,
         is_day_trip=is_day_trip,
         origin=origin_raw,
     )

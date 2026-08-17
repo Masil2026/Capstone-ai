@@ -118,3 +118,56 @@ async def test_korea_tourism_missing_api_key():
     result = await service.process_task("korea_tourism", "search_keyword", {"keyword": "시장"})
     assert result["status"] == "error"
     assert "KOREA_TOURISM_API_KEY" in result["message"]
+
+
+# ─────────────────────── 시도 매핑 (resolve_regn_code) ─────────────────────── #
+# 네트워크 불필요 — 정적 매핑 단위 테스트
+
+from app.services.adapters.korea_tourism_api import resolve_regn_code, resolve_addr_prefix
+
+
+def test_resolve_regn_code_basic():
+    """도시명 정규화 후 시도 법정동 코드 매핑."""
+    assert resolve_regn_code("서울특별시") == "11"
+    assert resolve_regn_code("부산") == "26"
+    assert resolve_regn_code("제주도") == "50"
+    assert resolve_regn_code("제주특별자치도") == "50"
+
+
+def test_resolve_regn_code_new_special_provinces():
+    """강원=51 / 전북=52 신규 특별자치도 코드 (구코드 42·45 아님)."""
+    assert resolve_regn_code("강원") == "51"
+    assert resolve_regn_code("강원특별자치도") == "51"
+    assert resolve_regn_code("전북") == "52"
+    assert resolve_regn_code("전라북도") == "52"
+
+
+def test_resolve_regn_code_major_tourist_cities():
+    """대표 관광도시(시군구)도 시도로 매핑돼 게이팅 히트율을 높인다."""
+    assert resolve_regn_code("강릉") == "51"   # 강원
+    assert resolve_regn_code("경주") == "47"   # 경북
+    assert resolve_regn_code("전주") == "52"   # 전북
+    assert resolve_regn_code("서귀포시") == "50"  # 제주
+
+
+def test_resolve_regn_code_normalization():
+    """앞 토큰만 취해 정규화 — '제주도, Jeju' 같은 혼합 입력도 처리."""
+    assert resolve_regn_code("제주도, Jeju") == "50"
+    assert resolve_regn_code(" 부산광역시 ") == "26"
+
+
+def test_resolve_regn_code_overseas_returns_none():
+    """해외·미매핑 도시는 None → TourAPI 호출 스킵(게이팅)."""
+    assert resolve_regn_code("Tokyo") is None
+    assert resolve_regn_code("도쿄") is None
+    assert resolve_regn_code("Paris") is None
+    assert resolve_regn_code(None) is None
+    assert resolve_regn_code("") is None
+
+
+def test_resolve_addr_prefix():
+    """addr1 후처리 필터용 시도 접두사."""
+    assert resolve_addr_prefix("제주도") == "제주"
+    assert resolve_addr_prefix("강원특별자치도") == "강원"
+    assert resolve_addr_prefix("경주") == "경상북도"
+    assert resolve_addr_prefix("Tokyo") is None
