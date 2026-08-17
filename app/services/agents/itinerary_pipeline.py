@@ -26,7 +26,14 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
 from app.core.config import settings
-from app.schemas.ai_message import OrchestratorResult
+from app.schemas.ai_message import (
+    AiSummary,
+    CancelFields,
+    ChangeFields,
+    DayPlanItem,
+    OrchestratorResult,
+    ReservationFields,
+)
 from app.services.adapters.booking_api import BookingAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
 from app.services.adapters.korea_tourism_api import (
@@ -639,11 +646,34 @@ class SynthesizerDeps:
     origin: str | None = None           # 출발지 (한국어 원본, 미입력 시 None)
 
 
+class _DayPlanEntry(BaseModel):
+    date: str  # YYYY-MM-DD
+    items: list[DayPlanItem]
+
+
+class _SynthesizerOutput(BaseModel):
+    """synthesizer_agent 전용 LLM 출력 스키마.
+
+    gemini-3.7-flash는 구조화 출력에서 숫자로 시작하는 dict 키('2026-09-10')를
+    임의 접두어로 오염시킨다 (예: 'rm_2026_09_10', 'json_key_2026_09_10' — 호출마다 다름,
+    plain_word_keys('day1')처럼 문자로 시작하는 키는 오염되지 않음. 격리 프로브로 확인).
+    day_plans를 dict가 아닌 list[date+items]로 받아 이 문제를 피하고,
+    get_output() 직후 OrchestratorResult.day_plans(dict)로 변환한다.
+    """
+    message: str
+    ai_summary: AiSummary = None
+    preferences: dict[str, Any] | None = None
+    day_plans: list[_DayPlanEntry] | None = None
+    change: ChangeFields | None = None
+    reservation: ReservationFields | None = None
+    cancel: CancelFields | None = None
+
+
 synthesizer_agent = Agent(
     model=_build_model("orchestrator"),
     deps_type=SynthesizerDeps,
-    output_type=OrchestratorResult,
-    system_prompt="당신은 여행 일정 완성 전문가입니다. 제공된 데이터를 바탕으로 OrchestratorResult JSON을 반환하라.",
+    output_type=_SynthesizerOutput,
+    system_prompt="당신은 여행 일정 완성 전문가입니다. 제공된 데이터를 바탕으로 JSON을 반환하라.",
 )
 
 
@@ -686,19 +716,19 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         f"- 1일차 첫 항목: {origin_ctx['word']} 출발 항공 이동 (leg_index=0 depart 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  당일 도착 예) {\"plan_name\": \"인천국제공항(ICN) → 도쿄 나리타(NRT) 항공 이동 (XX항공)\", \"time\": \"09:00 ~ 11:30\", \"cost\": {\"amount\": 850000, \"currency\": \"KRW\"}, \"note\": \"출발 09:00 ICN (KST+9) | 도착 11:30 NRT (JST+9) | 총 비행시간 약 2h 30m | 시차 0h\"}",
         "⚠️ 다음날 도착 항공(+1일) 처리 규칙 — 반드시 준수:",
-        "   출발일 day_plans 키: 공항 이동 항목 + 항공 이동 항목(time='출발시각 ~ 23:59')만 포함. 체크인·식사·관광 절대 금지.",
+        "   출발일 항목: 공항 이동 항목 + 항공 이동 항목(time='출발시각 ~ 23:59')만 포함. 체크인·식사·관광 절대 금지.",
         "   출발일 항공 이동 항목 cost: '선택된 항공편' 섹션의 price_original·currency 반드시 기재 (cost=null 절대 금지).",
-        "   도착일 day_plans 첫 항목(반드시 추가): {\"plan_name\": \"[항공사] 기내 (비행 중) → [공항코드] 도착\", \"time\": \"00:00 ~ 도착지현지시각\", \"cost\": null}",
+        "   도착일 첫 항목(반드시 추가): {\"plan_name\": \"[항공사] 기내 (비행 중) → [공항코드] 도착\", \"time\": \"00:00 ~ 도착지현지시각\", \"cost\": null}",
         "   도착일 이후 항목: 공항 → 숙소 이동 + 체크인 + 식사 등 도착 후 활동.",
-        "   예) '2026-12-20': [{\"plan_name\":\"숙소→ICN 이동\",\"time\":\"09:00~11:00\",...}, {\"plan_name\":\"ICN→STN 항공 이동 (XX항공)\",\"time\":\"11:30~23:59\",\"cost\":{\"amount\":850,\"currency\":\"GBP\",\"amount_krw\":1500000},...}]",
-        "       '2026-12-21': [{\"plan_name\":\"XX항공 기내 (비행 중) → STN 도착\",\"time\":\"00:00~16:45\",\"cost\":null}, ...]",
+        "   예) {\"date\":\"2026-12-20\",\"items\":[{\"plan_name\":\"숙소→ICN 이동\",\"time\":\"09:00~11:00\",...}, {\"plan_name\":\"ICN→STN 항공 이동 (XX항공)\",\"time\":\"11:30~23:59\",\"cost\":{\"amount\":850,\"currency\":\"GBP\",\"amount_krw\":1500000},...}]}",
+        "       {\"date\":\"2026-12-21\",\"items\":[{\"plan_name\":\"XX항공 기내 (비행 중) → STN 도착\",\"time\":\"00:00~16:45\",\"cost\":null}, ...]}",
         "- 도시 이동일 첫 항목: 도시 간 이동 항공 (해당 구간 connect 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  예) {\"plan_name\": \"파리 샤를드골(CDG) → 로마 피우미치노(FCO) 항공 이동 (항공사명)\", \"time\": \"HH:MM ~ HH:MM\", \"cost\": {\"amount\": price_original, \"currency\": currency}}",
         f"- 마지막날 마지막 항목: {origin_ctx['word']} 귀국 항공 이동 (return 편 사용). cost는 '선택된 항공편' price_original·currency 그대로 사용. cost=null 절대 금지.",
         "  예) {\"plan_name\": \"로마 피우미치노(FCO) → 인천국제공항(ICN) 귀국 항공 (항공사명)\", \"time\": \"HH:MM ~ HH:MM\", \"cost\": {\"amount\": price_original, \"currency\": currency}}",
         f"  ⚠️ 귀국편 도착 날짜는 반드시 여행 마지막 날({destinations[-1]['end_date'][:10]})이어야 한다.",
         f"  {origin_ctx['word']} 도착이 {destinations[-1]['end_date'][:10]} 이후로 넘어가는 일정은 절대 금지.",
-        f"  day_plans에 {destinations[-1]['end_date'][:10]} 이후 날짜 키가 생기면 안 된다.",
+        f"  day_plans에 {destinations[-1]['end_date'][:10]} 이후 날짜 항목이 생기면 안 된다.",
         "- 각 항공 이동 항목 직전: 공항 이동 항목 삽입 (출발 2~3시간 전 기준, 새벽 출발이면 심야 이동도 그대로 기재)",
         "  ⚠️ 공항 이동 항목의 plan_name에는 반드시 공항명과 IATA 코드를 함께 표기한다.",
         "  예) plan_name='숙소 → 인천국제공항(ICN) 이동 (공항버스/택시)', time='01:30 ~ 03:00'",
@@ -722,12 +752,14 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         f"    예) '1일차는 {destinations[0]['city'] if destinations else '첫 번째 도시'} 도착 후 시내 탐방, 2일차는..."
         if destinations else "    예) '1일차는 도착 후 시내 탐방...'",
         "  - 기존 일정(## 기존 일정)이 있으면 수정: 반영한 요청과 변경 결과를 구체적으로 설명한다.",
-        "- `day_plans`: 키='YYYY-MM-DD'. 아래 규칙에 따라 반환할 날짜가 결정된다:",
+        "- `day_plans`: {\"date\": \"YYYY-MM-DD\", \"items\": [...]} 객체의 리스트다 (dict 아님).",
+        "  ⚠️ date 필드는 반드시 'YYYY-MM-DD' 문자열 그대로 쓴다 (다른 접두어·구분자로 바꾸지 말 것).",
+        "  아래 규칙에 따라 반환할 날짜가 결정된다:",
         "  ① 신규 생성(기존 일정 없음): 아래 [## 반드시 포함해야 할 전체 날짜 목록]의 모든 날짜.",
-        f"    ⚠️ day_plans 키 수는 반드시 {len(all_dates)}개여야 한다. 단 1일도 누락 불가.",
+        f"    ⚠️ day_plans 항목(날짜) 수는 반드시 {len(all_dates)}개여야 한다. 단 1일도 누락 불가.",
         "  ② 날짜 변경 수정: [## 날짜 변경 재계획 대상] 섹션의 날짜만 반환. 나머지는 포함하지 않는다.",
         "  ③ 일반 수정(날짜 변경 없음): 사용자가 요청한 날짜만 반환. 나머지는 포함하지 않는다.",
-        "  ⚠️ 각 날짜의 값은 비어 있으면 절대 안 됨 — {} 또는 [] 반환 절대 금지.",
+        "  ⚠️ 각 날짜의 items는 비어 있으면 절대 안 됨 — [] 반환 절대 금지.",
         "  이동일·경유일·항공 탑승일도 포함. 활동이 없으면 이동 항목 1개라도 반드시 추가.",
         "- `ai_summary`: 번호 목록 형식으로 작성한다.",
         "  형식: 각 항목을 '1. 2. 3.' 번호로 나열. 항목당 한 줄로 핵심 사실만 기술.",
@@ -766,8 +798,8 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
         "⚠️ 하루의 끝은 23:59로 표기한다. 24:00은 절대 사용하지 않는다. 다음 날 시작은 반드시 00:00 사용.",
         "   예) 전날 항공: time='20:07 ~ 23:59' / 다음날 기내 연속: time='00:00 ~ 21:22'",
         "⚠️ 항공 외 일반 일정은 자정을 넘으면 별도 항목 분리.",
-        "⚠️ 자정 이후(00:00~)에 이어지는 모든 일정은 반드시 다음 날짜의 day_plans bucket에 넣는다.",
-        "   예) 2026-05-29 '23:45 ~ 23:59 저녁 식사' 후 이어지는 '00:00 ~ 00:45 저녁 식사', '00:50 ~ 01:00 숙소 귀환'은 모두 2026-05-30 bucket에 작성.",
+        "⚠️ 자정 이후(00:00~)에 이어지는 모든 일정은 반드시 다음 날짜의 항목(entry)에 넣는다.",
+        "   예) 2026-05-29 '23:45 ~ 23:59 저녁 식사' 후 이어지는 '00:00 ~ 00:45 저녁 식사', '00:50 ~ 01:00 숙소 귀환'은 모두 2026-05-30 항목에 작성.",
         "⚠️ 같은 활동을 자정 기준으로 분리한 경우 cost는 첫 번째 조각에만 작성하고, 다음 날짜 continuation 조각의 cost는 반드시 null로 둔다.",
         "   예) 식사 cost는 23:45~23:59 항목에만 작성, 00:00~00:45 continuation 항목은 cost=null.",
         "올바른 예) '09:00 ~ 10:30', '20:07 ~ 23:59', '00:00 ~ 21:22', '23:30 ~ 23:59', '00:00 ~ 02:15'",
@@ -886,7 +918,7 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
     if not existing_plans and all_dates:
         lines += [
             "",
-            f"## 반드시 포함해야 할 전체 날짜 목록 (총 {len(all_dates)}일 — day_plans 키로 하나도 빠짐없이 추가)",
+            f"## 반드시 포함해야 할 전체 날짜 목록 (총 {len(all_dates)}일 — day_plans 항목으로 하나도 빠짐없이 추가)",
         ]
         for dt in all_dates:
             lines.append(f"  - {dt}")
@@ -2194,7 +2226,18 @@ async def run_itinerary_pipeline(
                         yield msg[len(prev_msg):]
                         prev_msg = msg
                         yielded_any = True
-                result = await stream.get_output()
+                raw = await stream.get_output()
+                # gemini-3.x가 숫자로 시작하는 dict 키를 오염시키는 문제 회피용으로
+                # day_plans를 list로 받았다 — 여기서 원래 dict 형태로 되돌린다.
+                result = OrchestratorResult(
+                    message=raw.message,
+                    ai_summary=raw.ai_summary,
+                    preferences=raw.preferences,
+                    day_plans={e.date: e.items for e in raw.day_plans} if raw.day_plans else None,
+                    change=raw.change,
+                    reservation=raw.reservation,
+                    cancel=raw.cancel,
+                )
             break
         except Exception as e:
             if _is_rate_limit_error(e) and attempt < 3 and not yielded_any:
