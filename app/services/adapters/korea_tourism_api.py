@@ -37,7 +37,7 @@ _ALIAS_TO_CODE: Dict[str, str] = {
 _CODE_TO_PREFIX: Dict[str, str] = {code: prefix for code, prefix, _aliases in _SIDO_TABLE}
 
 
-def _normalize_city(city: Optional[str]) -> str:
+def normalize_city(city: Optional[str]) -> str:
     """도시명 정규화 — 앞 토큰만 취해 공백 제거. 예) '제주도, Jeju' → '제주도'."""
     if not city:
         return ""
@@ -47,7 +47,7 @@ def _normalize_city(city: Optional[str]) -> str:
 
 def resolve_regn_code(city: Optional[str]) -> Optional[str]:
     """도시명 → 시도 법정동 코드(lDongRegnCd). 매핑에 없으면 None (해외·미매핑 → 스킵)."""
-    return _ALIAS_TO_CODE.get(_normalize_city(city))
+    return _ALIAS_TO_CODE.get(normalize_city(city))
 
 
 def resolve_addr_prefix(city: Optional[str]) -> Optional[str]:

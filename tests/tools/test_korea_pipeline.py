@@ -119,6 +119,82 @@ def test_korea_keyword_keeps_real_attraction():
     assert p._korea_keyword("성산일출봉 제주 (Seongsan Ilchulbong)", "제주도") == "성산일출봉"
 
 
+# ─────────────────── 도시명 제거 실패로 전량 0건 (이슈 #25) ─────────────────── #
+
+@pytest.mark.parametrize(
+    "city_kr",
+    ["부산광역시, 대한민국", "부산 (Busan)", "부산광역시", "부산시", "부산"],
+)
+def test_korea_keyword_strips_autocomplete_city(city_kr):
+    """city_kr이 Place Autocomplete 원본 형태여도 도시명을 제거한다.
+
+    원본을 그대로 replace하면 '광안대교 야경 부산'처럼 도시명이 남아
+    searchKeyword2가 전부 0건이 됐다(#25).
+    """
+    query = "광안대교 야경 부산 (Gwangandaegyo Bridge Night View Busan)"
+    assert p._korea_keyword(query, city_kr) == "광안대교 야경"
+
+
+def test_korea_keyword_fallbacks_order():
+    """0건 완화 후보는 공백 제거 → 마지막 어절 제거 순."""
+    assert p._korea_keyword_fallbacks("광안대교 야경") == ["광안대교야경", "광안대교"]
+    assert p._korea_keyword_fallbacks("송도 해상케이블카") == ["송도해상케이블카"]
+
+
+def test_korea_keyword_fallbacks_drops_generic_place():
+    """어절을 떼어 일반 지명만 남는 후보는 버린다 (#23 오매칭 재발 방지).
+
+    '해운대 해수욕장' → '해운대', '기장 칠암 붕장어마을' → '기장' 은 후보에서 제외.
+    """
+    assert p._korea_keyword_fallbacks("해운대 해수욕장") == ["해운대해수욕장"]
+    assert "기장" not in p._korea_keyword_fallbacks("기장 칠암 붕장어마을")
+
+
+def test_korea_keyword_fallbacks_single_token_empty():
+    """어절이 하나면 완화할 여지가 없어 빈 리스트."""
+    assert p._korea_keyword_fallbacks("동백섬") == []
+
+
+def test_korea_has_items_distinguishes_empty_success():
+    """0건 응답도 status=success라 items 유무로 판정해야 한다."""
+    assert p._korea_has_items({"status": "success", "data": {"items": [{"title": "x"}]}}) is True
+    assert p._korea_has_items({"status": "success", "data": {"items": [], "total_count": 0}}) is False
+    assert p._korea_has_items({"status": "error"}) is False
+    assert p._korea_has_items({"status": "skip"}) is False
+
+
+@pytest.mark.asyncio
+async def test_korea_cached_does_not_store_empty(monkeypatch):
+    """0건은 캐싱하지 않는다 — 캐싱하면 TTL 24h 동안 빈 결과가 재사용돼 수정 검증이 막힌다(#25)."""
+    stored: dict = {}
+
+    class _FakeRedis:
+        async def get(self, key):
+            return stored.get(key)
+
+        async def set(self, key, value, ex=None):
+            stored[key] = value
+
+    class _FakeService:
+        def __init__(self, result):
+            self.result = result
+
+        async def process_task(self, *args, **kwargs):
+            return self.result
+
+    empty = {"status": "success", "data": {"items": [], "total_count": 0}}
+    monkeypatch.setattr(p, "_redis", _FakeRedis())
+    monkeypatch.setattr(p, "_service", _FakeService(empty))
+
+    assert await p._korea_cached("search_keyword", {"keyword": "없는곳"}, "keyword:없는곳") == empty
+    assert stored == {}, "0건이 캐싱되면 안 된다"
+
+    filled = {"status": "success", "data": {"items": [{"title": "성산일출봉"}]}}
+    monkeypatch.setattr(p, "_service", _FakeService(filled))
+    await p._korea_cached("search_keyword", {"keyword": "성산일출봉"}, "keyword:성산일출봉")
+    assert "tourapi:keyword:성산일출봉" in stored, "항목이 있으면 캐싱돼야 한다"
+
+
 # ─────────────────── image_url 오매칭(일반 지명 오염) 방지 ─────────────────── #
 
 @pytest.mark.asyncio

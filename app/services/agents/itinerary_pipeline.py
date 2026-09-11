@@ -38,6 +38,7 @@ from app.services.adapters.booking_api import BookingAdapter
 from app.services.adapters.google_maps import GoogleMapsAdapter
 from app.services.adapters.korea_tourism_api import (
     KoreaTourismAdapter,
+    normalize_city,
     resolve_addr_prefix,
     resolve_regn_code,
 )
@@ -1045,8 +1046,21 @@ def _build_synthesizer_prompt(d: SynthesizerDeps) -> str:
 _KOREA_CACHE_TTL = 86400  # 24h
 
 
+def _korea_has_items(res: Any) -> bool:
+    """korea_tourism 결과에 실제 항목이 들어 있는지. 0건 응답도 status=success라 따로 판정한다."""
+    return (
+        isinstance(res, dict)
+        and res.get("status") == "success"
+        and bool((res.get("data") or {}).get("items"))
+    )
+
+
 async def _korea_cached(action: str, params: dict, cache_key: str) -> dict:
-    """korea_tourism 호출을 Redis로 캐싱. 키 = tourapi:{cache_key}. 성공 결과만 저장."""
+    """korea_tourism 호출을 Redis로 캐싱. 키 = tourapi:{cache_key}. 항목이 있는 결과만 저장.
+
+    0건 응답을 캐싱하면 원인을 고쳐도 TTL(24h) 동안 빈 결과가 계속 재사용되어
+    수정 검증 자체가 막힌다(#25). 0건은 저장하지 않고 다음 호출에서 다시 조회한다.
+    """
     full_key = f"tourapi:{cache_key}"
     try:
         cached = await _redis.get(full_key)
@@ -1055,7 +1069,7 @@ async def _korea_cached(action: str, params: dict, cache_key: str) -> dict:
     except Exception:
         pass  # 캐시 장애는 무시하고 원본 호출로 진행
     result = await _service.process_task("korea_tourism", action, params)
-    if isinstance(result, dict) and result.get("status") == "success":
+    if _korea_has_items(result):
         try:
             await _redis.set(full_key, json.dumps(result, ensure_ascii=False), ex=_KOREA_CACHE_TTL)
         except Exception:
@@ -1585,18 +1599,53 @@ def _korea_keyword(query: str, city_kr: str | None) -> str | None:
     - 끝의 '(영문)' 괄호와 도시명(제주도/제주 등)을 제거
     - 식사·이동 등 서술형 검색어는 한국관광공사 대상이 아니므로 None (스킵)
     예) '비자림 제주 (Jeju)' → '비자림' / '저녁식사 흑돼지 제주 (Jeju)' → None
+
+    ⚠️ city_kr은 프론트 Place Autocomplete 원본이라 '부산광역시, 대한민국' 형태일 수 있다.
+    원본 그대로 replace하면 쿼리의 '부산'과 안 맞아 도시명이 남고, 검색이 전부 0건이 된다(#25).
+    normalize_city로 앞 토큰만 취한 뒤 행정구역 접미사까지 벗겨 후보를 넓힌다.
     """
     q = re.sub(r"\s*\([^)]*\)\s*$", "", query or "").strip()
     variants = set()
-    if city_kr:
-        variants.add(city_kr)
-        variants.add(re.sub(r"(특별자치도|광역시|특별시|도|시)$", "", city_kr))
+    for c in (city_kr, normalize_city(city_kr)):
+        if not c:
+            continue
+        variants.add(c)
+        variants.add(re.sub(r"(특별자치도|광역시|특별시|도|시)$", "", c))
     for v in sorted((v for v in variants if v), key=len, reverse=True):
         q = q.replace(v, " ")
     q = re.sub(r"\s+", " ", q).strip()
     if not q or any(w in q for w in _KOREA_SKIP_WORDS):
         return None
     return q
+
+
+def _korea_keyword_fallbacks(keyword: str) -> list[str]:
+    """searchKeyword2가 0건일 때 순서대로 재시도할 완화 후보.
+
+    TourAPI 제목 매칭은 띄어쓰기와 수식어에 민감해 LLM이 붙인 말 한 마디로 0건이 된다.
+    예) '해운대 해수욕장' → '해운대해수욕장' / '광안대교 야경' → '광안대교'
+
+    ⚠️ 어절을 떼어낸 후보는 정보가 줄어 오매칭 위험이 커진다(#23 이미지 오매칭과 같은 유형).
+    그래서 마지막 어절만 떼고, 최소 길이도 공백 제거만 한 후보보다 높게 잡는다.
+    '해운대 해수욕장' → '해운대', '기장 칠암 붕장어마을' → '기장' 처럼 일반 지명만 남는 후보는 버린다.
+    """
+    # (후보, 최소 길이) — 공백 제거는 같은 말이라 3자, 어절 삭제는 정보 손실이라 4자
+    candidates: list[tuple[str, int]] = []
+    nospace = keyword.replace(" ", "")
+    if nospace != keyword:
+        candidates.append((nospace, 3))
+    tokens = keyword.split()
+    if len(tokens) > 1:
+        candidates.append((" ".join(tokens[:-1]), 4))
+
+    out: list[str] = []
+    for c, min_len in candidates:
+        if c == keyword or c in out:
+            continue
+        if len(c.replace(" ", "")) < min_len:
+            continue
+        out.append(c)
+    return out
 
 
 def _korea_pick_image(raw: Any, query: str) -> tuple[str | None, str | None, str | None]:
@@ -1641,7 +1690,15 @@ async def _fetch_places(planner_output: PlannerOutput) -> dict[str, dict]:
         if not kw:  # 식사·이동 등은 한국관광공사 대상 아님 → 스킵
             return {"status": "skip"}
         # 키워드 검색은 quota 최대 소비처 → 캐싱(동일 키워드 반복 방지)
-        return await _korea_cached("search_keyword", {"keyword": kw, "numOfRows": 5}, f"keyword:{kw}")
+        res = await _korea_cached("search_keyword", {"keyword": kw, "numOfRows": 5}, f"keyword:{kw}")
+        if _korea_has_items(res):
+            return res
+        # 0건이면 완화 후보로 재시도 (후보별로 캐싱되어 반복 호출은 1회씩만 발생)
+        for alt in _korea_keyword_fallbacks(kw):
+            res = await _korea_cached("search_keyword", {"keyword": alt, "numOfRows": 5}, f"keyword:{alt}")
+            if _korea_has_items(res):
+                return res
+        return res
 
     # google_maps(장소·평점)와 korea_tourism(국내 이미지)을 병렬 호출 — 해외는 korea가 빈 결과
     google_res, korea_res = await asyncio.gather(
